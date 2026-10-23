@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import AudioLevels 1.0
 import CameraStatus 1.0
 import MicState 1.0
 import KeyState 1.0
@@ -21,6 +22,13 @@ PlasmoidItem {
     // control action, or when the MSI WMI hotkey device emits an Fn key event.
     MsiEc {
         id: msi
+    }
+
+    // Five real spectrum bands from the default sink monitor. The stream is
+    // opened only while media is playing and closed as soon as it pauses.
+    AudioLevels {
+        id: audioLevels
+        running: root.enableMedia && root.mediaPlaying
     }
 
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
@@ -113,7 +121,9 @@ PlasmoidItem {
     readonly property int compactWidth: Math.max(compactMinWidth, Math.min(compactMaxWidth, compactContentWidth + compactSidePadding * 2))
     readonly property int expandedWidth: activeMode === 0 ? Plasmoid.configuration.expandedWidthMusic
         : activeMode === 2 ? Plasmoid.configuration.expandedWidthNotification
-        : Plasmoid.configuration.expandedWidthStatus
+        : activeMode === 3 && msi.available && msi.canControl
+            ? Math.max(Plasmoid.configuration.expandedWidthStatus, 380)
+            : Plasmoid.configuration.expandedWidthStatus
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
         const cfg = Plasmoid.configuration.expandedHeight
@@ -1587,6 +1597,8 @@ PlasmoidItem {
             SoundBars {
                 visible: root.activeMode === 0
                 playing: root.mediaPlaying
+                levels: audioLevels.levels
+                reactive: audioLevels.ready
                 Layout.preferredWidth: 30
                 Layout.preferredHeight: 26
             }
@@ -1762,13 +1774,15 @@ PlasmoidItem {
 
             SoundBars {
                 id: musicBars
-                anchors.right: parent.right
-                anchors.rightMargin: 16
+                anchors.left: musicArt.right
+                anchors.leftMargin: 12
                 anchors.top: parent.top
                 anchors.topMargin: 16
                 width: 38
                 height: 28
                 playing: root.mediaPlaying
+                levels: audioLevels.levels
+                reactive: audioLevels.ready
             }
 
             Row {
@@ -1821,10 +1835,10 @@ PlasmoidItem {
 
             PlasmaComponents.Label {
                 id: musicTitle
-                anchors.left: musicArt.right
-                anchors.leftMargin: 14
-                anchors.right: musicBars.left
-                anchors.rightMargin: 14
+                anchors.left: musicBars.right
+                anchors.leftMargin: 12
+                anchors.right: parent.right
+                anchors.rightMargin: 16
                 anchors.top: parent.top
                 anchors.topMargin: 16
                 text: root.mediaTitle || "No title"
@@ -1835,10 +1849,10 @@ PlasmoidItem {
             }
 
             PlasmaComponents.Label {
-                anchors.left: musicArt.right
-                anchors.leftMargin: 14
-                anchors.right: musicBars.left
-                anchors.rightMargin: 14
+                anchors.left: musicBars.right
+                anchors.leftMargin: 12
+                anchors.right: parent.right
+                anchors.rightMargin: 16
                 anchors.top: musicTitle.bottom
                 anchors.topMargin: 2
                 text: root.mediaArtist || root.mediaIdentity || "Media player"
@@ -2217,48 +2231,51 @@ PlasmoidItem {
         id: soundBarsRoot
 
         property bool playing: false
+        property bool reactive: false
+        property var levels: []
 
         spacing: 3
-        width: 23
+        width: 27
         height: 26
 
         Repeater {
             model: [14, 22, 10, 18, 16]
 
             Rectangle {
+                id: bar
                 width: 3
-                height: modelData
+                height: soundBarsRoot.reactive && soundBarsRoot.levels.length > index
+                    ? 4 + soundBarsRoot.levels[index] * 22
+                    : modelData * fakeLevel
                 anchors.verticalCenter: parent.verticalCenter
                 radius: 1.5
                 color: root.textPrimary
                 opacity: soundBarsRoot.playing ? 0.9 : 0.55
-                transformOrigin: Item.Center
-                transform: Scale {
-                    id: barScale
-                    origin.x: width / 2
-                    origin.y: height / 2
-                    xScale: 1
-                    yScale: 0.45
+
+                property real fakeLevel: 0.45
+
+                Behavior on height {
+                    enabled: soundBarsRoot.reactive
+                    NumberAnimation { duration: 70; easing.type: Easing.OutQuad }
                 }
 
-                // Live equalizer pulse: each bar runs its own up/down loop with a
-                // different duration so the bars naturally desync. Runs only while
-                // media is playing and is driven by the animation engine (no JS
-                // timers), so idle cost is zero.
+                // Fallback when no monitor stream is ready: a lightweight
+                // animation-engine pulse. Once real levels arrive, the height
+                // is driven by the audio callback instead.
                 SequentialAnimation {
-                    running: soundBarsRoot.playing
+                    running: soundBarsRoot.playing && !soundBarsRoot.reactive
                     loops: Animation.Infinite
                     NumberAnimation {
-                        target: barScale
-                        property: "yScale"
+                        target: bar
+                        property: "fakeLevel"
                         from: 0.35
                         to: 1
                         duration: 240 + (index % 5) * 100
                         easing.type: Easing.InOutSine
                     }
                     NumberAnimation {
-                        target: barScale
-                        property: "yScale"
+                        target: bar
+                        property: "fakeLevel"
                         from: 1
                         to: 0.35
                         duration: 240 + (index % 5) * 100
