@@ -1,0 +1,6 @@
+build/
+plugins/**/*.o
+plugins/**/*.so
+plugins/**/*.moc
+plugins/**/harness
+plugins/**/lib*.so
