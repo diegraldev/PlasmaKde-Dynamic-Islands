@@ -685,32 +685,14 @@ PlasmoidItem {
 
     // PlasmaCore.Dialog centres the popup on its visual parent. The island sits
     // at the far right of the panel, so a 300/340 px popup would extend past the
-    // screen edge. Shift an invisible anchor left just enough to keep the popup
-    // inside the screen, with a small breathing margin on both sides.
-    readonly property int popupScreenMargin: 16
-    readonly property real popupMaxRightMargin: 16
-    // Responsive cap: never wider than the space from island center to screen right
-    readonly property int popupMaxWidth: {
+    // Pinned right anchor: popup grows leftward; right edge stays at screen edge - margin.
+    readonly property int popupRightMargin: 16
+    readonly property real popupAnchorX: {
         const geo = Plasmoid.screenGeometry
-        if (!geo || root.width <= 0 || root.mapToGlobal === undefined) return root.expandedWidth
-        const center = root.mapToGlobal(Qt.point(root.width / 2, 0)).x
+        if (!geo || root.width <= 0 || root.mapToGlobal === undefined) return 0
         const screenRight = geo.x + geo.width
-        const avail = screenRight - center - popupMaxRightMargin
-        return Math.max(200, Math.min(root.expandedWidth, Math.floor(avail * 2)))
-    }
-    readonly property real popupHorizontalShift: {
-        const geo = Plasmoid.screenGeometry
-        if (geo === null || geo === undefined || root.width <= 0) {
-            return 0
-        }
-        const center = root.mapToGlobal(Qt.point(root.width / 2, 0)).x
-        const half = root.expandedWidth / 2
-        const minCenter = geo.x + popupScreenMargin + half
-        const maxCenter = geo.x + geo.width - popupScreenMargin - half
-        if (maxCenter < minCenter) {
-            return 0
-        }
-        return center - Math.max(minCenter, Math.min(maxCenter, center))
+        const appletGlobal = root.mapToGlobal(Qt.point(0, 0)).x
+        return (screenRight - root.popupRightMargin - root.expandedWidth) - appletGlobal
     }
 
     Timer {
@@ -1551,9 +1533,9 @@ PlasmoidItem {
     // Empty, non-interactive anchor used only for popup positioning.
     Item {
         id: popupAnchor
-        width: root.width
+        width: root.expandedWidth
         height: root.height
-        x: -root.popupHorizontalShift
+        x: root.popupAnchorX
         y: 0
     }
 
@@ -1581,7 +1563,7 @@ PlasmoidItem {
 
         mainItem: Item {
             id: popupRootItem
-            width: root.popupMaxWidth
+            width: root.expandedWidth
             height: root.expandedHeight + root.popupGapTop + root.popupGapBottom
             opacity: root.popupOpen ? 1 : 0
             scale: root.popupOpen ? 1 : 0.92
