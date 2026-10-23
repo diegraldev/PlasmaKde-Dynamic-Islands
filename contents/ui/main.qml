@@ -131,18 +131,10 @@ PlasmoidItem {
     }
     readonly property int compactContentWidth: compactLeadingWidth + compactTextWidth + compactTrailingWidth + compactGapWidth + compactSeparatorsWidth
     readonly property int compactWidth: Math.max(compactMinWidth, Math.min(compactMaxWidth, compactContentWidth + compactSidePadding * 2))
-    // Transparent gutter on the right of the capsule. The applet itself is at
-    // the right end of the panel, so this is what keeps the island from being
-    // visually glued to the screen edge.
-    readonly property int compactRightMargin: 16
-    readonly property int compactOuterWidth: compactWidth + compactRightMargin
-    // Keep the status dashboard compact. Above 300 px the two-column tiles
-    // leave a large dead gap between the value and its detail.
-    readonly property int statusPopupWidth: Math.max(280, Math.min(Plasmoid.configuration.expandedWidthStatus, 300))
     readonly property int expandedWidth: displayMode === 0 ? Plasmoid.configuration.expandedWidthMusic
         : displayMode === 2 ? Plasmoid.configuration.expandedWidthNotification
         : displayMode === 3
-            ? statusPopupWidth
+            ? Math.min(Plasmoid.configuration.expandedWidthStatus, 300)
             : Plasmoid.configuration.expandedWidthStatus
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
@@ -413,11 +405,11 @@ PlasmoidItem {
         return m + ":" + String(s).padStart(2, "0")
     }
 
-    Layout.minimumWidth: compactOuterWidth
+    Layout.minimumWidth: compactWidth
     Layout.minimumHeight: compactHeight
-    Layout.preferredWidth: compactOuterWidth
+    Layout.preferredWidth: compactWidth
     Layout.preferredHeight: compactHeight
-    Layout.maximumWidth: compactOuterWidth
+    Layout.maximumWidth: compactWidth
     Layout.maximumHeight: compactHeight
 
     implicitWidth: Layout.preferredWidth
@@ -703,7 +695,7 @@ PlasmoidItem {
         if (geo === null || geo === undefined || root.width <= 0) {
             return 0
         }
-        const center = root.mapToGlobal(Qt.point(root.width - root.compactRightMargin - root.compactWidth / 2, 0)).x
+        const center = root.mapToGlobal(Qt.point(root.width / 2, 0)).x
         const half = root.expandedWidth / 2
         const minCenter = geo.x + popupScreenMargin + half
         const maxCenter = geo.x + geo.width - popupScreenMargin - half
@@ -1532,9 +1524,7 @@ PlasmoidItem {
     Rectangle {
         id: island
 
-        anchors.right: parent.right
-        anchors.rightMargin: root.compactRightMargin
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.centerIn: parent
         width: root.compactWidth
         height: root.compactHeight
         radius: height / 2
@@ -1555,7 +1545,7 @@ PlasmoidItem {
         id: popupAnchor
         width: root.width
         height: root.height
-        x: -root.popupHorizontalShift - root.compactRightMargin / 2
+        x: -root.popupHorizontalShift
         y: 0
     }
 
