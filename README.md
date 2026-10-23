@@ -21,21 +21,29 @@ hardware-specific integrations for an MSI Pulse GL66 11UGKV (MS-1581).
   monitor. The stream is opened only while media is playing.
 - Bars use five log-spaced bands from bass to treble and normalize each band
   against the broadband level, so changing the player volume does not change
-  the bar heights. A fixed spectral calibration and a wide 26 dB range keep
-  bass, mids and treble visually distinct instead of lighting every bar to the
-  same height. The expanded music panel shows only cover, title, progress and
-  transport controls; the animated bars live in the compact capsule.
+  the bar heights. A fixed spectral calibration and a deliberately wide 38 dB
+  range keep bass, mids and treble visually distinct; ordinary playback stays
+  in the lower/middle part of each bar, and a bar only reaches the top for a
+  genuinely dominant tone in its own range. The expanded music panel shows only
+  cover, title, progress and transport controls; the animated bars live in the
+  compact capsule.
 - Camera presence from udev (`video4linux` capture devices only), with a
   hardware-blocked state from MSI EC.
 - MSI EC controls: Cooler Boost, fan mode, shift mode, Super Battery and the
   webcam kill switch. Shift values are shown with the familiar
   Performance/Balanced/Powersave names (`turbo`/`comfort`/`eco` in sysfs).
   Values are read on demand and refreshed on popup open, after an action, or
-  when an MSI WMI Fn hotkey is pressed.
+  when an MSI WMI Fn hotkey is pressed. The idle popup itself is read-only:
+  fan/shift/boost controls live in the applet context menu.
+- System status popup: keyboard layout, CPU usage, GPU usage, CPU/GPU
+  temperature, RAM usage and battery percentage/state. CPU and RAM come from
+  `/proc`; GPU usage/temperature come from NVML (loaded directly, no
+  `nvidia-smi` subprocess). The sampler runs only while the status popup is
+  open and stops when it closes.
 
-Everything is event driven. There is no polling daemon, no persistent helper
-process and no `pactl` subprocess; PulseAudio/udev/D-Bus/input events drive the
-state changes directly.
+Apart from the short status-popup sampler, everything is event driven. There is
+no polling daemon, no persistent helper process and no `pactl` subprocess;
+PulseAudio/udev/D-Bus/input events drive the state changes directly.
 
 ## Layout
 
@@ -49,6 +57,9 @@ state changes directly.
   - `audiolevels` — five real, volume-normalized spectrum bands from the active
     player's sink input (fallback: default sink monitor), active only while
     media is playing (libpulse, no polling).
+  - `systemstats` — CPU/RAM from `/proc` and GPU usage/temperature through a
+    minimal dynamically loaded NVML binding; sampled only while the status
+    popup is open.
 - `build-plugins.sh` — builds and installs the QML modules into
   `~/.local/share/qml/`. Restart `plasmashell` after installing.
 - `scripts/` — optional one-time MSI EC permission setup.

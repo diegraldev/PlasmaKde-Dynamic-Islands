@@ -15,5 +15,6 @@ build_one camera
 build_one keystate
 build_one msiec
 build_one audiolevels
+build_one systemstats
 
 echo "All plugins installed. Restart plasmashell to load them."

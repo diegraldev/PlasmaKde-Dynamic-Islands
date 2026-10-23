@@ -106,12 +106,14 @@ private:
     static constexpr std::array<float, kBandCount> kBandCenters = {
         -9.5f, -15.2f, -21.8f, -37.1f, -48.7f
     };
-    // Slight downward target curve: bass has more energy, treble less, but
-    // every bar still moves around a useful part of its range.
+    // Deliberately conservative target curve: a normal mix sits around these
+    // heights, while a bar only reaches the top for a genuinely dominant tone
+    // in its own range. Bass therefore needs a near-solo bass hit, and treble
+    // needs a much stronger high-frequency transient than ordinary music.
     static constexpr std::array<float, kBandCount> kBandTargets = {
-        0.62f, 0.56f, 0.52f, 0.48f, 0.44f
+        0.48f, 0.44f, 0.40f, 0.36f, 0.32f
     };
-    static constexpr float kBandSpanDb = 26.0f;
+    static constexpr float kBandSpanDb = 38.0f;
 
     void startPulse()
     {
@@ -496,8 +498,8 @@ private:
                 const float relativeDb = bandDb - overallDb;
                 // Fixed calibration, not per-band auto-centering: a song with
                 // strong bass and weak treble should visibly look that way.
-                // The 26 dB span gives the bars room to move without pinning
-                // them at the top on ordinary playback.
+                // The 38 dB span keeps ordinary playback in the lower/middle
+                // part of each bar; reaching 1.0 needs a dominant band.
                 const float normalized = std::clamp(
                     kBandTargets[i] + (relativeDb - kBandCenters[i]) / kBandSpanDb,
                     0.0f, 1.0f);

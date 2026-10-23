@@ -5,6 +5,7 @@ import CameraStatus 1.0
 import MicState 1.0
 import KeyState 1.0
 import MsiEc 1.0
+import SystemStats 1.0
 import VolumeWatcher 1.0
 import org.kde.kirigami as Kirigami
 import org.kde.notificationmanager as NotificationManager
@@ -33,6 +34,13 @@ PlasmoidItem {
         // when it can match the identity; otherwise it falls back to the
         // default sink monitor.
         mediaIdentity: root.mediaIdentity
+    }
+
+    // CPU/RAM/GPU sampling runs only while the status popup is open. The timer
+    // stops as soon as the popup closes, so nothing is polled in the background.
+    SystemStats {
+        id: systemStats
+        active: root.popupOpen && root.displayMode === 3
     }
 
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
@@ -102,13 +110,13 @@ PlasmoidItem {
     readonly property int compactSidePadding: 1
     readonly property int compactLeadingWidth: {
         if (showGreenDot) return 10
-        if (activeMode === 0) return 30 + 6 + 22
+        if (activeMode === 0) return 24 + 5 + 22
         if (activeMode === 14) return 136
         return 24
     }
     readonly property int compactTrailingWidth: (activeMode === 2 && unreadCount > 0) ? 22 : Math.ceil(compactTimeMetrics.width)
-    readonly property int compactGapWidth: showGreenDot ? 8 : activeMode === 0 ? 24 : 16
-    readonly property int compactSeparatorsWidth: moduleSeparators ? Math.max(0, compactVisibleList.length - 1) * 16 : 0
+    readonly property int compactGapWidth: showGreenDot ? 8 : moduleSeparators ? 4 : 6
+    readonly property int compactSeparatorsWidth: moduleSeparators ? Math.max(0, compactVisibleList.length - 1) * 10 : 0
     readonly property int compactTextWidth: {
         const measured = Math.ceil(compactTitleMetrics.width)
         // When idle or empty text, don't reserve space
@@ -125,15 +133,15 @@ PlasmoidItem {
     readonly property int compactWidth: Math.max(compactMinWidth, Math.min(compactMaxWidth, compactContentWidth + compactSidePadding * 2))
     readonly property int expandedWidth: displayMode === 0 ? Plasmoid.configuration.expandedWidthMusic
         : displayMode === 2 ? Plasmoid.configuration.expandedWidthNotification
-        : displayMode === 3 && msi.available && msi.canControl
+        : displayMode === 3
             ? Math.max(Plasmoid.configuration.expandedWidthStatus, 380)
             : Plasmoid.configuration.expandedWidthStatus
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
         const cfg = Plasmoid.configuration.expandedHeight
-        if (displayMode === 3 && msi.available && msi.canControl) {
-            // The idle popup also hosts the MSI control pills.
-            return Math.max(cfg, 96)
+        if (displayMode === 3) {
+            // The status popup hosts the system metric tiles.
+            return Math.max(cfg, 136)
         }
         if (displayMode !== 11 || !timerHasCount) return cfg
         // A running timer draws an extra row of icon controls along the bottom.
@@ -775,6 +783,11 @@ PlasmoidItem {
     }
 
     // Battery capsule text for the current UPower state.
+    function statusTemp(primary, fallback) {
+        const value = primary > 0 ? primary : fallback
+        return value > 0 ? value + "°C" : "--°C"
+    }
+
     function batteryCaption() {
         if (!battery.hasBattery || battery.percent < 0) {
             return ""
@@ -1589,7 +1602,7 @@ PlasmoidItem {
             anchors.fill: parent
             anchors.leftMargin: root.compactSidePadding
             anchors.rightMargin: root.compactSidePadding
-            spacing: root.moduleSeparators ? 6 : 8
+            spacing: root.moduleSeparators ? 4 : 6
 
             Repeater {
                 model: root.compactVisibleList
@@ -1597,7 +1610,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignVCenter
                     Layout.fillWidth: modelData === "content"
-                    spacing: root.moduleSeparators ? 6 : 8
+                    spacing: root.moduleSeparators ? 4 : 6
 
                     PlasmaComponents.Label {
                         visible: index > 0 && root.moduleSeparators
@@ -2030,7 +2043,7 @@ PlasmoidItem {
                 PlasmaComponents.Label {
                     width: parent.width
                     text: root.displayMode === 3
-                        ? (root.activeMode === 3 ? (root.keyboardLongName || root.keyboardShortName || "Status") : "Status")
+                        ? (root.keyboardLongName || root.keyboardShortName || "Status")
                         : root.compactTitle
                     color: root.textPrimary
                     opacity: root.displayMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
@@ -2041,7 +2054,7 @@ PlasmoidItem {
 
                 PlasmaComponents.Label {
                     width: parent.width
-                    text: root.displayMode === 3 ? (msi.available ? "CPU " + msi.cpuTemp + "°C · GPU " + msi.gpuTemp + "°C" : "Status") :
+                    text: root.displayMode === 3 ? (battery.hasBattery ? (root.batteryCaption() || "System status") : "System status") :
                           root.displayMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
                           root.displayMode === 7 ? "Active capture or presentation mode" :
                           root.displayMode === 8 ? (root.buildApp + (root.buildSuccess ? " · " + "success" : " · " + "failed")) :
@@ -2056,24 +2069,39 @@ PlasmoidItem {
                     elide: Text.ElideRight
                 }
 
-                // MSI controls are available in the idle popup. They are plain
-                // one-shot writes (sysfs or pkexec); no background service.
-                Row {
-                    visible: root.displayMode === 3 && msi.available && msi.canControl
-                    spacing: 6
+                // Compact system overview. MSI fan/shift controls live in the
+                // context menu now; the idle popup is read-only status.
+                GridLayout {
+                    visible: root.displayMode === 3
+                    width: parent.width
+                    columns: 2
+                    columnSpacing: 6
+                    rowSpacing: 6
 
-                    ActionPill {
-                        label: "Boost"
-                        active: msi.coolerBoost
-                        onTriggered: root.toggleMsiCoolerBoost()
+                    StatusMetric {
+                        label: "CPU"
+                        value: systemStats.cpuUsage + "%"
+                        detail: root.statusTemp(msi.cpuTemp, 0)
                     }
-                    ActionPill {
-                        label: root.msiFanLabel()
-                        onTriggered: root.cycleMsiFan()
+                    StatusMetric {
+                        label: "GPU"
+                        value: systemStats.gpuAvailable ? systemStats.gpuUsage + "%" : "--"
+                        detail: root.statusTemp(msi.gpuTemp, systemStats.gpuTemp)
                     }
-                    ActionPill {
-                        label: root.msiShiftLabel()
-                        onTriggered: root.cycleMsiShift()
+                    StatusMetric {
+                        label: "RAM"
+                        value: systemStats.ramPercent + "%"
+                        detail: systemStats.ramTotalGb > 0
+                            ? systemStats.ramUsedGb.toFixed(1) + " / " + systemStats.ramTotalGb.toFixed(1) + " GB"
+                            : ""
+                    }
+                    StatusMetric {
+                        label: "BATTERY"
+                        value: battery.hasBattery && battery.percent >= 0 ? battery.percent + "%" : "--"
+                        detail: !battery.hasBattery ? "No battery"
+                            : battery.chargeState === 1 ? "Charging"
+                            : battery.chargeState === 4 ? "Full"
+                            : battery.pluggedIn ? "Plugged in" : "On battery"
                     }
                 }
 
@@ -2123,6 +2151,53 @@ PlasmoidItem {
                     iconName: "dialog-close"
                     onTriggered: root.timerDelete()
                 }
+            }
+        }
+    }
+
+    component StatusMetric: Rectangle {
+        property string label: ""
+        property string value: ""
+        property string detail: ""
+
+        Layout.fillWidth: true
+        Layout.preferredHeight: 38
+        radius: 8
+        color: Qt.rgba(1, 1, 1, 0.06)
+        border.width: 1
+        border.color: Qt.rgba(1, 1, 1, 0.035)
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 9
+            anchors.rightMargin: 9
+            spacing: 6
+
+            Column {
+                Layout.fillWidth: true
+                spacing: 0
+
+                PlasmaComponents.Label {
+                    text: label
+                    color: root.textSecondary
+                    font.pointSize: 7
+                    font.weight: Font.DemiBold
+                }
+                PlasmaComponents.Label {
+                    text: value
+                    color: root.textPrimary
+                    font.pointSize: 13
+                    font.weight: Font.DemiBold
+                }
+            }
+
+            PlasmaComponents.Label {
+                text: detail
+                color: root.textSecondary
+                font.pointSize: 9
+                Layout.alignment: Qt.AlignBottom
+                elide: Text.ElideRight
+                Layout.maximumWidth: 80
             }
         }
     }
