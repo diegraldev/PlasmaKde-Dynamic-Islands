@@ -3,15 +3,19 @@
         "Authors": [
             {
                 "Name": "ifny75"
+            },
+            {
+                "Name": "diegraldev"
             }
         ],
         "Category": "Date and Time",
-        "Description": "Dynamic-island style capsule for the Plasma panel: clock, media, notifications, keyboard layout, battery, microphone, volume, camera, downloads, screen sharing, IDE builds and MSI EC controls — fully customizable.",
+        "Description": "Dynamic-island style capsule for the Plasma panel: clock, media, notifications, keyboard layout, battery, microphone, volume, camera, downloads, screen sharing, IDE builds, system status and MSI EC controls — fully customizable.",
         "Icon": "notifications",
         "Id": "com.ifny75.dynamicisland",
         "License": "MIT",
         "Name": "Dynamic Island",
-        "Version": "1.5.2"
+        "Website": "https://github.com/diegraldev/PlasmaKde-Dynamic-Islands",
+        "Version": "1.5.3"
     },
     "KPackageStructure": "Plasma/Applet",
     "X-Plasma-API-Minimum-Version": "6.0"

@@ -140,8 +140,9 @@ PlasmoidItem {
     readonly property int expandedHeight: {
         const cfg = Plasmoid.configuration.expandedHeight
         if (displayMode === 3) {
-            // The status popup hosts the system metric tiles.
-            return Math.max(cfg, 136)
+            // The status popup hosts the system metric tiles plus breathing
+            // room below them.
+            return Math.max(cfg, 144)
         }
         if (displayMode !== 11 || !timerHasCount) return cfg
         // A running timer draws an extra row of icon controls along the bottom.
@@ -682,6 +683,26 @@ PlasmoidItem {
         }
         const p = root.mapToGlobal(Qt.point(0, root.compactHeight))
         return p.y > geo.y + geo.height / 2 ? PlasmaCore.Types.BottomEdge : PlasmaCore.Types.TopEdge
+    }
+
+    // PlasmaCore.Dialog centres the popup on its visual parent. The island sits
+    // at the far right of the panel, so a 340/380 px popup would extend past the
+    // screen edge. Shift an invisible anchor left just enough to keep the popup
+    // inside the screen, with a small breathing margin on both sides.
+    readonly property int popupScreenMargin: 12
+    readonly property real popupHorizontalShift: {
+        const geo = Plasmoid.screenGeometry
+        if (geo === null || geo === undefined || root.width <= 0) {
+            return 0
+        }
+        const center = root.mapToGlobal(Qt.point(root.width / 2, 0)).x
+        const half = root.expandedWidth / 2
+        const minCenter = geo.x + popupScreenMargin + half
+        const maxCenter = geo.x + geo.width - popupScreenMargin - half
+        if (maxCenter < minCenter) {
+            return 0
+        }
+        return center - Math.max(minCenter, Math.min(maxCenter, center))
     }
 
     Timer {
@@ -1519,10 +1540,19 @@ PlasmoidItem {
         }
     }
 
+    // Empty, non-interactive anchor used only for popup positioning.
+    Item {
+        id: popupAnchor
+        width: root.width
+        height: root.height
+        x: -root.popupHorizontalShift
+        y: 0
+    }
+
     PlasmaCore.Dialog {
         id: popup
 
-        visualParent: root
+        visualParent: popupAnchor
         location: root.popupLocation
         visible: false
         hideOnWindowDeactivate: false
@@ -2020,6 +2050,7 @@ PlasmoidItem {
 
             StatusIcon {
                 id: statusIcon
+                visible: root.displayMode !== 3
                 anchors.left: parent.left
                 anchors.leftMargin: 16
                 anchors.verticalCenter: parent.verticalCenter
@@ -2031,13 +2062,13 @@ PlasmoidItem {
             }
 
             Column {
-                anchors.left: statusIcon.right
-                anchors.leftMargin: 14
+                anchors.left: root.displayMode === 3 ? parent.left : statusIcon.right
+                anchors.leftMargin: root.displayMode === 3 ? 16 : 14
                 anchors.right: parent.right
-                anchors.rightMargin: 16
-                anchors.top: statusRoot.hasControls ? parent.top : undefined
-                anchors.topMargin: statusRoot.hasControls ? 14 : 0
-                anchors.verticalCenter: statusRoot.hasControls ? undefined : parent.verticalCenter
+                anchors.rightMargin: root.displayMode === 3 ? 18 : 16
+                anchors.top: root.displayMode === 3 || statusRoot.hasControls ? parent.top : undefined
+                anchors.topMargin: root.displayMode === 3 ? 14 : statusRoot.hasControls ? 14 : 0
+                anchors.verticalCenter: root.displayMode === 3 || statusRoot.hasControls ? undefined : parent.verticalCenter
                 spacing: 5
 
                 PlasmaComponents.Label {
@@ -2047,15 +2078,15 @@ PlasmoidItem {
                         : root.compactTitle
                     color: root.textPrimary
                     opacity: root.displayMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
-                    font.pointSize: 13
+                    font.pointSize: root.displayMode === 3 ? 11 : 13
                     font.weight: Font.Medium
                     elide: Text.ElideRight
                 }
 
                 PlasmaComponents.Label {
+                    visible: root.displayMode !== 3
                     width: parent.width
-                    text: root.displayMode === 3 ? (battery.hasBattery ? (root.batteryCaption() || "System status") : "System status") :
-                          root.displayMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
+                    text: root.displayMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
                           root.displayMode === 7 ? "Active capture or presentation mode" :
                           root.displayMode === 8 ? (root.buildApp + (root.buildSuccess ? " · " + "success" : " · " + "failed")) :
                           root.displayMode === 9 ? (root.cameraBlocked ? "Camera blocked by hardware switch" : "Camera") :
