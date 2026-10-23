@@ -1,0 +1,14 @@
+#!/bin/sh
+# Grant the desktop user's group write access to the MSI EC control attributes.
+# Invoked by the optional udev rule (or manually with sudo).
+set -eu
+
+dir=/sys/devices/platform/msi-ec
+group=${MSI_EC_GROUP:-wheel}
+
+for attr in cooler_boost fan_mode shift_mode super_battery webcam_block webcam win_key fn_key; do
+    path="$dir/$attr"
+    [ -e "$path" ] || continue
+    /usr/bin/chgrp "$group" "$path" 2>/dev/null || true
+    /usr/bin/chmod 0660 "$path" 2>/dev/null || true
+done

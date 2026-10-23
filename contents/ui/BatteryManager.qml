@@ -13,16 +13,18 @@ QtObject {
 
     // --- public state (read-only for consumers) ---
     property int percent: -1
-    property bool charging: false
+    property bool charging: false      // UPower State == Charging
+    property bool pluggedIn: false     // AC adapter online
     property bool hasBattery: false
-    property int chargeState: 0        // UPower State: 1 charging, 2 discharging, 4 full
+    property int chargeState: 0        // UPower State: 1 charging, 2 discharging, 4 full, 5 pending
+    property int remainingMsec: 0      // time to empty/full, whichever applies
     property int lowThreshold: 20      // <= this % while discharging -> 3s capsule
     property int warnThreshold: 15     // <= this % while discharging -> 6s capsule
     property int criticalThreshold: 10 // <= this % while discharging -> persistent capsule until AC plugged
     property bool critical: false
 
     // --- public signals (UI reacts to these) ---
-    signal acStateChanged(bool charging)
+    signal acStateChanged(bool pluggedIn)
     signal lowBattery(int percent)
     signal warnBattery(int percent)
 
@@ -33,6 +35,36 @@ QtObject {
     property bool lowArmed: false
     property bool warnArmed: false
     property var watchers: ({})        // device path -> DBus.Properties
+
+    // DBus.Properties returns gadget-wrapped values on GetAll/refreshed, but
+    // plain values on PropertiesChanged. Normalise both shapes here; without
+    // this the battery froze at the first value after boot.
+    function prop(props, key, fallback) {
+        if (!props) {
+            return fallback
+        }
+        const x = props[key]
+        if (x === undefined || x === null) {
+            return fallback
+        }
+        if (typeof x === "object" && "value" in x) {
+            return x.value
+        }
+        return x
+    }
+
+    function numberOf(props, key, fallback) {
+        const n = Number(root.prop(props, key, fallback))
+        return Number.isFinite(n) ? n : fallback
+    }
+
+    function boolOf(props, key, fallback) {
+        const x = root.prop(props, key, fallback)
+        if (typeof x === "string") {
+            return x === "true" || x === "1" || x === "yes"
+        }
+        return Boolean(x)
+    }
 
     // Attached as a property (QtObject has no default property for children).
     property DBus.SignalWatcher upowerWatcher: DBus.SignalWatcher {
@@ -68,8 +100,15 @@ QtObject {
         if (path === "" || root.watchers[path]) {
             return
         }
-        const props = devicePropsComponent.createObject(root, { devicePath: path })
+        // Create first, then set devicePath. Setting it as an initial property
+        // races with DBus.Properties' own setup and logs "Could not set initial
+        // property devicePath" in plasmashell.
+        const props = devicePropsComponent.createObject(root)
+        if (!props) {
+            return
+        }
         root.watchers[path] = props
+        props.devicePath = path
     }
 
     function unwatchDevice(path) {
@@ -82,9 +121,15 @@ QtObject {
         if (path === root.batteryPath) {
             root.batteryPath = ""
             root.hasBattery = false
+            root.percent = -1
+            root.charging = false
+            root.chargeState = 0
+            root.remainingMsec = 0
+            root.critical = false
         }
         if (path === root.acPath) {
             root.acPath = ""
+            root.pluggedIn = false
         }
     }
 
@@ -98,22 +143,20 @@ QtObject {
             arguments: []
         })
         reply.finished.connect(() => {
-            if (reply.isError) {
-                return
+            if (!reply.isError) {
+                const paths = reply.value || []
+                for (let i = 0; i < paths.length; i++) {
+                    root.watchDevice(String(paths[i]))
+                }
             }
-            const paths = reply.value || []
-            for (let i = 0; i < paths.length; i++) {
-                root.watchDevice(String(paths[i]))
-            }
+            reply.destroy()
         })
     }
 
     function applyDevice(path, props) {
-        const type = Number((props["Type"] || {}).value || 0)
+        const type = root.numberOf(props, "Type", 0)
         if (type === 1) {
-            if (props["Online"] !== undefined) {
-                root.applyAc(path, Boolean(props["Online"]))
-            }
+            root.applyAc(path, root.boolOf(props, "Online", false))
         } else if (type === 2) {
             root.applyBattery(path, props)
         }
@@ -123,9 +166,14 @@ QtObject {
         if (root.acPath === "") {
             root.acPath = path
         }
-        const prev = root.charging
-        root.charging = online
-        if (root.acSynced && online !== prev) {
+        const changed = root.pluggedIn !== online
+        root.pluggedIn = online
+        if (online) {
+            root.critical = false
+        } else {
+            root.charging = false
+        }
+        if (root.acSynced && changed) {
             // Re-read authoritative values shortly after a plug/unplug: UPower
             // can emit a transient 0% (or a partial map without Percentage)
             // mid-transition, and the resync replaces any such value.
@@ -139,24 +187,31 @@ QtObject {
         if (root.batteryPath === "") {
             root.batteryPath = path
         }
-        root.hasBattery = Boolean(props["IsPresent"])
+        root.hasBattery = root.boolOf(props, "IsPresent", root.hasBattery)
 
-        // Only accept fields actually present in this update. Partial
-        // PropertiesChanged maps and transient 0% reads during AC transitions
-        // must not clobber a good reading; applyAc's resync re-reads them.
-        if (props["State"] !== undefined && props["State"] !== null) {
-            root.chargeState = Number((props["State"] || {}).value || 0)
+        if (props && props["State"] !== undefined && props["State"] !== null) {
+            root.chargeState = root.numberOf(props, "State", root.chargeState)
         }
-        if (props["Percentage"] !== undefined && props["Percentage"] !== null) {
-            const pct = Math.round(Number((props["Percentage"] || {}).value || 0))
+
+        if (props && props["Percentage"] !== undefined && props["Percentage"] !== null) {
+            const pct = Math.round(root.numberOf(props, "Percentage", root.percent))
+            // Ignore a transient 0% while we still have a good reading.
             if (!(pct === 0 && root.percent > 0)) {
-                root.percent = pct
+                root.percent = Math.max(0, Math.min(100, pct))
             }
         }
 
-        // Low-battery guard: announce once per crossing while discharging.
-        const discharging = root.chargeState === 2
+        root.charging = root.chargeState === 1
+
+        const timeToEmpty = root.numberOf(props, "TimeToEmpty", 0)
+        const timeToFull = root.numberOf(props, "TimeToFull", 0)
+        const seconds = root.charging || root.chargeState === 5 ? timeToFull : timeToEmpty
+        root.remainingMsec = Math.max(0, Math.round(seconds * 1000))
+
+        const discharging = !root.pluggedIn || root.chargeState === 2 || root.chargeState === 6
         const pct = root.percent
+
+        // Low-battery guard: announce once per crossing while discharging.
         const lowNow = discharging && pct <= root.lowThreshold && pct > 0
         if (lowNow && root.lowArmed) {
             root.lowArmed = false
@@ -174,10 +229,8 @@ QtObject {
             root.warnArmed = true
         }
 
-        // Critical guard: persistent until the AC adapter is plugged in again
-        // (charging state clears it via the same applyBattery path).
-        const criticalNow = discharging && pct <= root.criticalThreshold && pct > 0
-        root.critical = criticalNow
+        // Critical guard: persistent until the AC adapter is plugged in again.
+        root.critical = discharging && pct <= root.criticalThreshold && pct > 0
     }
 
     property Timer resyncTimer: Timer {

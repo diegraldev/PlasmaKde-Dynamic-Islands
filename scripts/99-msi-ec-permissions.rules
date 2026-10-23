@@ -1,0 +1,3 @@
+# Make the MSI EC controls writable by the local desktop group so the Dynamic
+# Island can toggle Cooler Boost / fan mode without a polkit prompt each time.
+ACTION=="add|change", SUBSYSTEM=="platform", DRIVER=="msi-ec", RUN+="/usr/local/libexec/msi-ec-permissions"

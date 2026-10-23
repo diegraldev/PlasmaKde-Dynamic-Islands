@@ -1,11 +1,14 @@
 #include "micstate.h"
 
+#include <QMetaObject>
+#include <QTimer>
+
 #include <pulse/subscribe.h>
 
 namespace {
 
 constexpr pa_subscription_mask_t kSubscribeMask =
-    static_cast<pa_subscription_mask_t>(PA_SUBSCRIPTION_MASK_SOURCE);
+    static_cast<pa_subscription_mask_t>(PA_SUBSCRIPTION_MASK_SOURCE | PA_SUBSCRIPTION_MASK_SERVER);
 
 } // namespace
 
@@ -21,30 +24,33 @@ MicState::~MicState()
 
 void MicState::setRunning(bool running)
 {
-    if (m_running == running) {
+    if (m_running.load() == running) {
         return;
     }
-    m_running = running;
-    if (m_running) {
+    m_running.store(running);
+    if (running) {
         startPulse();
     } else {
         stopPulse();
     }
-    Q_EMIT runningChanged(m_running);
+    Q_EMIT runningChanged(running);
 }
 
 void MicState::refresh()
 {
-    if (m_context) {
-        requestStatus();
+    if (!m_loop) {
+        return;
     }
+    pa_threaded_mainloop_lock(m_loop);
+    requestStatus();
+    pa_threaded_mainloop_unlock(m_loop);
 }
 
 // ---- life cycle -----------------------------------------------------------
 
 void MicState::startPulse()
 {
-    if (m_loop) {
+    if (m_loop || !m_running.load()) {
         return;
     }
     m_hasMute = false;
@@ -61,7 +67,13 @@ void MicState::startPulse()
         return;
     }
     pa_context_set_state_callback(m_context, &MicState::contextStateCb, this);
-    pa_context_connect(m_context, nullptr, PA_CONTEXT_NOFLAGS, nullptr);
+    if (pa_context_connect(m_context, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+        pa_context_unref(m_context);
+        m_context = nullptr;
+        pa_threaded_mainloop_free(m_loop);
+        m_loop = nullptr;
+        return;
+    }
     pa_threaded_mainloop_start(m_loop);
 }
 
@@ -78,10 +90,54 @@ void MicState::stopPulse()
     }
     pa_threaded_mainloop_free(m_loop);
     m_loop = nullptr;
-    if (m_ready) {
-        m_ready = false;
+    m_hasMute = false;
+    m_hasPublishedMute = false;
+    m_defaultSource.clear();
+    if (m_ready.exchange(false)) {
         Q_EMIT readyChanged(false);
     }
+}
+
+void MicState::scheduleReconnect()
+{
+    if (!m_running.load() || m_reconnectScheduled.exchange(true)) {
+        return;
+    }
+    // Called from the PulseAudio thread. Tear down and retry on the GUI thread;
+    // this is a single-shot retry after a real failure, not a polling loop.
+    QMetaObject::invokeMethod(this, [this] {
+        if (!m_running.load()) {
+            m_reconnectScheduled.store(false);
+            return;
+        }
+        stopPulse();
+        QTimer::singleShot(3000, this, [this] {
+            m_reconnectScheduled.store(false);
+            if (m_running.load()) {
+                startPulse();
+            }
+        });
+    }, Qt::QueuedConnection);
+}
+
+void MicState::publishMuted(bool muted)
+{
+    if (m_muted.exchange(muted) == muted) {
+        return;
+    }
+    QMetaObject::invokeMethod(this, [this, muted] {
+        Q_EMIT mutedChanged(muted);
+    }, Qt::QueuedConnection);
+}
+
+void MicState::publishReady(bool ready)
+{
+    if (m_ready.exchange(ready) == ready) {
+        return;
+    }
+    QMetaObject::invokeMethod(this, [this, ready] {
+        Q_EMIT readyChanged(ready);
+    }, Qt::QueuedConnection);
 }
 
 // ---- libpulse callbacks ----------------------------------------------------
@@ -89,15 +145,13 @@ void MicState::stopPulse()
 void MicState::contextStateCb(pa_context *c, void *userdata)
 {
     MicState *self = static_cast<MicState *>(userdata);
-    pa_context_state_t state = pa_context_get_state(c);
-    switch (state) {
+    switch (pa_context_get_state(c)) {
     case PA_CONTEXT_READY:
         self->onContextReady();
         break;
     case PA_CONTEXT_FAILED:
     case PA_CONTEXT_TERMINATED:
-        // Server disappeared or was never there. Stay quiet; the running
-        // property is unchanged so the watcher can come back later.
+        self->scheduleReconnect();
         break;
     default:
         break;
@@ -110,23 +164,26 @@ void MicState::onContextReady()
         return;
     }
     pa_context_set_subscribe_callback(m_context, &MicState::subscribeCb, this);
-    pa_context_subscribe(m_context, kSubscribeMask, nullptr, nullptr);
-    if (!m_ready) {
-        m_ready = true;
-        Q_EMIT readyChanged(true);
+    pa_operation *op = pa_context_subscribe(m_context, kSubscribeMask, nullptr, nullptr);
+    if (op) {
+        pa_operation_unref(op);
     }
+    publishReady(true);
     requestStatus();
 }
 
 void MicState::subscribeCb(pa_context *c, pa_subscription_event_type_t t, uint32_t, void *userdata)
 {
     MicState *self = static_cast<MicState *>(userdata);
-    pa_subscription_event_type_t event_type = static_cast<pa_subscription_event_type_t>(
+    const auto eventType = static_cast<pa_subscription_event_type_t>(
         t & PA_SUBSCRIPTION_EVENT_TYPE_MASK);
-    pa_subscription_event_type_t facility = static_cast<pa_subscription_event_type_t>(
+    const auto facility = static_cast<pa_subscription_event_type_t>(
         t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK);
-    if (facility == PA_SUBSCRIPTION_EVENT_SOURCE
-        && event_type == PA_SUBSCRIPTION_EVENT_CHANGE) {
+    if ((facility == PA_SUBSCRIPTION_EVENT_SOURCE
+         && (eventType == PA_SUBSCRIPTION_EVENT_CHANGE
+             || eventType == PA_SUBSCRIPTION_EVENT_NEW
+             || eventType == PA_SUBSCRIPTION_EVENT_REMOVE))
+        || facility == PA_SUBSCRIPTION_EVENT_SERVER) {
         self->requestStatus();
     }
 }
@@ -162,7 +219,7 @@ void MicState::sourceInfoCb(pa_context *, const pa_source_info *info, int eol, v
     MicState *self = static_cast<MicState *>(userdata);
     if (eol) {
         if (self->m_hasMute) {
-            self->finishRead(self->m_defaultSource, self->m_muteValue, true);
+            self->finishRead(self->m_muteValue);
         }
         return;
     }
@@ -172,11 +229,19 @@ void MicState::sourceInfoCb(pa_context *, const pa_source_info *info, int eol, v
     }
 }
 
-void MicState::finishRead(std::string, int muteValue, bool)
+void MicState::finishRead(int muteValue)
 {
-    bool muted = muteValue == 1;
-    if (m_muted != muted) {
-        m_muted = muted;
-        Q_EMIT mutedChanged(m_muted);
+    const bool muted = muteValue == 1;
+    if (!m_hasPublishedMute) {
+        // Publish the first known value even when it equals the default
+        // (unmuted), otherwise the QML side never learns the initial state and
+        // the first real mute would look like a no-op.
+        m_hasPublishedMute = true;
+        m_muted.store(muted);
+        QMetaObject::invokeMethod(this, [this, muted] {
+            Q_EMIT mutedChanged(muted);
+        }, Qt::QueuedConnection);
+        return;
     }
+    publishMuted(muted);
 }

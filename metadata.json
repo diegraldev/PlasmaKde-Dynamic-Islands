@@ -6,12 +6,12 @@
             }
         ],
         "Category": "Date and Time",
-        "Description": "Dynamic-island style capsule for the Plasma panel: clock, media, notifications, keyboard layout, downloads, screen sharing and IDE builds — fully customizable.",
+        "Description": "Dynamic-island style capsule for the Plasma panel: clock, media, notifications, keyboard layout, battery, microphone, volume, camera, downloads, screen sharing, IDE builds and MSI EC controls — fully customizable.",
         "Icon": "notifications",
         "Id": "com.ifny75.dynamicisland",
         "License": "MIT",
         "Name": "Dynamic Island",
-        "Version": "1.2.0"
+        "Version": "1.3.0"
     },
     "KPackageStructure": "Plasma/Applet",
     "X-Plasma-API-Minimum-Version": "6.0"

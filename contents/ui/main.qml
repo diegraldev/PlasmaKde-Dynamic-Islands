@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import CameraStatus 1.0
 import MicState 1.0
 import KeyState 1.0
+import MsiEc 1.0
 import VolumeWatcher 1.0
 import org.kde.kirigami as Kirigami
 import org.kde.notificationmanager as NotificationManager
@@ -16,7 +17,54 @@ import org.kde.plasma.workspace.dbus as DBus
 PlasmoidItem {
     id: root
 
+    // MSI EC is read once at startup and refreshed only on popup open, after a
+    // control action, or when the MSI WMI hotkey device emits an Fn key event.
+    MsiEc {
+        id: msi
+    }
+
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
+
+    // MSI EC controls are exposed through the applet context menu. They are
+    // one-shot actions (no menu, daemon or polling): the write path uses the
+    // sysfs attribute directly when permitted, otherwise a single pkexec call.
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: msi.coolerBoost ? "Disable Cooler Boost" : "Enable Cooler Boost"
+            icon.name: "weather-windy"
+            visible: msi.available
+            enabled: msi.canControl
+            onTriggered: root.toggleMsiCoolerBoost()
+        },
+        PlasmaCore.Action {
+            text: "Fan mode: " + (msi.fanMode || "unknown")
+            icon.name: "fan"
+            visible: msi.available
+            enabled: msi.canControl && msi.availableFanModes.length > 0
+            onTriggered: root.cycleMsiFan()
+        },
+        PlasmaCore.Action {
+            text: "Shift mode: " + (msi.shiftMode || "unknown")
+            icon.name: "speedometer"
+            visible: msi.available
+            enabled: msi.canControl && msi.availableShiftModes.length > 0
+            onTriggered: root.cycleMsiShift()
+        },
+        PlasmaCore.Action {
+            text: msi.superBattery ? "Disable Super Battery" : "Enable Super Battery"
+            icon.name: "battery-good"
+            visible: msi.available
+            enabled: msi.canControl
+            onTriggered: root.toggleMsiSuperBattery()
+        },
+        PlasmaCore.Action {
+            text: msi.webcamBlocked ? "Unblock Webcam" : "Block Webcam"
+            icon.name: msi.webcamBlocked ? "camera-web" : "camera-off"
+            visible: msi.available
+            enabled: msi.canControl
+            onTriggered: root.toggleMsiWebcam()
+        }
+    ]
 
     // Native hover tooltip showing the full text the compact capsule elides.
     toolTipMainText: {
@@ -30,8 +78,9 @@ PlasmoidItem {
         if (popupOpen) return ""
         if (showMedia) return mediaArtist || mediaIdentity || ""
         if (activeMode === 2) return notificationBody || notificationApp || ""
+        if (activeMode === 15) return msi.model + (msi.cpuTemp > 0 ? " · CPU " + msi.cpuTemp + "°C" : "")
         if (battery.hasBattery && battery.percent >= 0) {
-            return "Battery " + battery.percent + "% · " + (battery.charging ? "Charging" : "On battery")
+            return batteryCaption()
         }
         return ""
     }
@@ -42,8 +91,7 @@ PlasmoidItem {
     readonly property int compactLeadingWidth: {
         if (showGreenDot) return 10
         if (activeMode === 0) return 30 + 6 + 22
-        if (activeMode === 11 && timerRinging) return 0
-        if (activeMode === 14) return 121
+        if (activeMode === 14) return 136
         return 24
     }
     readonly property int compactTrailingWidth: (activeMode === 2 && unreadCount > 0) ? 22 : Math.ceil(compactTimeMetrics.width)
@@ -51,15 +99,14 @@ PlasmoidItem {
     readonly property int compactSeparatorsWidth: moduleSeparators ? Math.max(0, compactVisibleList.length - 1) * 16 : 0
     readonly property int compactTextWidth: {
         const measured = Math.ceil(compactTitleMetrics.width)
-        const elides = (activeMode === 0 || activeMode === 2)
         // When idle or empty text, don't reserve space
         if (!root.compactTitle || root.compactTitle.length === 0) {
             return showGreenDot ? 0 : 20
         }
         const textWidth = measured + 4  // 4px buffer for rounding
-        const maxTextWidth = elides ? 300 - 12  // 300px cap minus ~12px for "..."
-                             : compactMaxWidth - compactLeadingWidth - compactTrailingWidth
-                               - compactGapWidth - compactSeparatorsWidth - compactSidePadding * 2
+        const maxTextWidth = Math.min(300,
+            compactMaxWidth - compactLeadingWidth - compactTrailingWidth
+            - compactGapWidth - compactSeparatorsWidth - compactSidePadding * 2)
         return Math.max(0, Math.min(maxTextWidth, textWidth))
     }
     readonly property int compactContentWidth: compactLeadingWidth + compactTextWidth + compactTrailingWidth + compactGapWidth + compactSeparatorsWidth
@@ -70,6 +117,10 @@ PlasmoidItem {
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
         const cfg = Plasmoid.configuration.expandedHeight
+        if (activeMode === 3 && msi.available && msi.canControl) {
+            // The idle popup also hosts the MSI control pills.
+            return Math.max(cfg, 96)
+        }
         if (activeMode !== 11 || !timerHasCount) return cfg
         // A running timer draws an extra row of icon controls along the bottom.
         // Keep the panel at the configured height whenever it already fits under
@@ -108,8 +159,6 @@ PlasmoidItem {
         }
         return out
     }
-    readonly property bool eventActive: eventTimer.running || notificationPulse.running
-
     readonly property bool enableMedia: Plasmoid.configuration.enableMedia
     readonly property bool enableNotifications: Plasmoid.configuration.enableNotifications
     readonly property bool enableKeyboard: Plasmoid.configuration.enableKeyboard
@@ -219,6 +268,9 @@ PlasmoidItem {
         if (activeMode === 14) {
             return eventTimer.running ? (root.volWatcher.muted ? "0%" : root.volWatcher.volume + "%") : ""
         }
+        if (activeMode === 15) {
+            return eventTimer.running ? root.msiMessage : ""
+        }
         return ""
     }
 
@@ -249,7 +301,7 @@ PlasmoidItem {
     readonly property bool enableCamera: Plasmoid.configuration.enableCamera
     property bool cameraAvailable: false
     property bool cameraReady: false
-    property int cameraVideoCount: -1
+    readonly property bool cameraBlocked: msi.available && msi.webcamBlocked
     readonly property bool enableMic: Plasmoid.configuration.enableMic
     property bool micMuted: false
     property bool micReady: false
@@ -257,6 +309,8 @@ PlasmoidItem {
     readonly property bool enableVolume: Plasmoid.configuration.enableVolume
     property bool batteryLowShow: false
     property bool batteryWarnHold: false
+    property string msiMessage: ""
+    property string msiIcon: "weather-windy"
     readonly property string batteryMessage: {
         if (!battery.hasBattery || battery.percent < 0) {
             return ""
@@ -347,13 +401,26 @@ PlasmoidItem {
         font.weight: Font.Medium
     }
 
+    // The clock is scheduled to the next minute unless seconds, a running
+    // countdown or an open media popup actually need a one-second tick. This is
+    // still a timer, not a polling loop: one wake-up per minute while idle.
+    readonly property int clockInterval: {
+        if (Plasmoid.configuration.showSeconds || root.timerHasCount
+            || (root.mediaPlaying && root.popupOpen)) {
+            return 1000
+        }
+        const now = root.currentTime.getTime()
+        return Math.max(250, 60000 - (now % 60000) + 50)
+    }
+
     Timer {
-        interval: 1000
+        id: clockTimer
+        interval: root.clockInterval
         running: true
         repeat: true
         onTriggered: {
             root.currentTime = new Date()
-            if (root.mediaContainer && root.mediaPlaying) {
+            if (root.mediaContainer && root.mediaPlaying && root.popupOpen) {
                 root.mediaContainer.updatePosition()
             }
         }
@@ -399,6 +466,21 @@ PlasmoidItem {
         interval: 6000
     }
 
+    // kclockd emits runningChanged/timeCompletedChanged at the same instant it
+    // emits timerAdded, sometimes before our SignalWatcher exists. Re-read the
+    // settled state once after a short delay instead of creating a Timer object
+    // dynamically for every timer.
+    Timer {
+        id: timerSyncRetry
+        interval: 1200
+        property string timerUuid: ""
+        onTriggered: {
+            if (timerUuid.length > 0) {
+                root.syncTimerState(timerUuid)
+            }
+        }
+    }
+
     // Event-driven microphone mute state: the native MicState plugin connects
     // to PulseAudio and signals only when the default source mute actually
     // changes (subscribe-based). Zero polling, zero idle cost — same design as
@@ -406,17 +488,17 @@ PlasmoidItem {
     MicState {
         id: micState
         running: root.enableMic
-        onMutedChanged: root.setMicState(muted)
+        onMutedChanged: (muted) => root.setMicState(muted)
     }
 
     // Event-driven battery state via UPower D-Bus signals (no polling). The
     // manager only emits on real transitions, so announcements never spam.
     BatteryManager {
         id: battery
-        onAcStateChanged: (charging) => root.updateBatteryAnnounce(charging)
+        onAcStateChanged: root.updateBatteryAnnounce()
         onLowBattery: (percent) => root.updateBatteryLowAnnounce(percent)
         onWarnBattery: (percent) => root.updateBatteryWarnAnnounce(percent)
-        onCriticalChanged: (critical) => root.updateBatteryCritical(critical)
+        onCriticalChanged: root.updateBatteryCritical()
     }
 
     // Event-driven Caps/Num/Scroll lock state via KWin's keystate protocol.
@@ -435,18 +517,11 @@ PlasmoidItem {
     VolumeWatcher {
         id: volWatcher
         running: root.enableVolume
-        Component.onCompleted: {
-            console.warn("VW loaded vol=" + volume + " muted=" + muted + " en=" + running)
-        }
-        onVolumeAnnounce: {
-            console.warn("VW announce vol=" + volWatcher.volume + " muted=" + volWatcher.muted)
-            root.updateVolumeAnnounce()
-        }
-        onVolumeChanged: {
-            console.warn("VW vol changed: " + volume)
-        }
-        onMutedChanged: {
-            console.warn("VW muted changed: " + muted)
+        onVolumeAnnounce: root.updateVolumeAnnounce()
+        onMutedChanged: (muted) => {
+            if (volWatcher.ready) {
+                root.updateVolumeAnnounce()
+            }
         }
     }
 
@@ -458,11 +533,12 @@ PlasmoidItem {
     property bool volumeAnnounceActive: false
 
     function updateVolumeAnnounce() {
-        root.volumeAnnounceActive = true
-        if (enableVolume) {
-            modeIndex = 14
-            eventTimer.restart()
+        if (!enableVolume) {
+            return
         }
+        root.volumeAnnounceActive = true
+        modeIndex = 14
+        eventTimer.restart()
     }
 
     function withAlpha(hex, percent) {
@@ -563,6 +639,10 @@ PlasmoidItem {
     // to push the panel down is to make the window taller and shift its content
     // down by this margin (pure QML layout, works on any compositor).
     readonly property int popupGapMargin: Plasmoid.configuration.popupGap
+    // The gap belongs between the capsule and the panel: at the top when the
+    // popup opens downwards, at the bottom when it opens upwards.
+    readonly property int popupGapTop: popupLocation === PlasmaCore.Types.TopEdge ? popupGapMargin : 0
+    readonly property int popupGapBottom: popupLocation === PlasmaCore.Types.BottomEdge ? popupGapMargin : 0
 
     // The direction is derived from the panel edge by PlasmaCore, so on a
     // floating/top island the popup would open upward, toward the top of the
@@ -585,8 +665,17 @@ PlasmoidItem {
         }
     }
 
+    Shortcut {
+        sequence: "Escape"
+        enabled: popup.visible
+        onActivated: root.closePopup()
+    }
+
     function openPopup() {
         popupCloseTimer.stop()
+        // One-shot refresh of the MSI snapshot (temperatures, fan mode, webcam
+        // switch). No periodic polling; the plugin also refreshes on Fn keys.
+        msi.refresh()
         popup.visible = true
         popupOpen = true
     }
@@ -641,8 +730,7 @@ PlasmoidItem {
     }
 
     function updateCameraStatus(announce) {
-        cameraVideoCount = CameraStatus.videoCount
-        const available = CameraStatus.cameraAvailable
+        const available = CameraStatus.cameraAvailable && !root.cameraBlocked
         const changed = cameraReady && available !== cameraAvailable
         cameraAvailable = available
         if (announce && changed && enableCamera) {
@@ -673,15 +761,112 @@ PlasmoidItem {
         if (battery.critical) {
             return "Low battery " + battery.percent + "%"
         }
-        if (battery.charging) {
-            return battery.chargeState === 4 ? "Battery full" : "Charging " + battery.percent + "%"
+        const time = root.formatRemaining(battery.remainingMsec)
+        const suffix = time.length > 0 ? " · " + time : ""
+        if (battery.chargeState === 4) {
+            return "Battery full" + suffix
         }
-        return "On battery " + battery.percent + "%"
+        if (battery.chargeState === 1) {
+            return "Charging " + battery.percent + "%" + suffix
+        }
+        if (battery.pluggedIn) {
+            return "Plugged in " + battery.percent + "%" + suffix
+        }
+        return "On battery " + battery.percent + "%" + suffix
+    }
+
+    function formatRemaining(ms) {
+        if (!ms || ms <= 0) {
+            return ""
+        }
+        const totalMinutes = Math.round(ms / 60000)
+        const hours = Math.floor(totalMinutes / 60)
+        const minutes = totalMinutes % 60
+        if (hours > 0) {
+            return hours + "h " + (minutes < 10 ? "0" : "") + minutes + "m"
+        }
+        return minutes + "m"
+    }
+
+    function batteryIconName() {
+        if (!battery.hasBattery) {
+            return "battery-missing"
+        }
+        const p = battery.percent
+        let level = "000"
+        if (p >= 95) level = "100"
+        else if (p >= 85) level = "090"
+        else if (p >= 75) level = "080"
+        else if (p >= 65) level = "070"
+        else if (p >= 55) level = "060"
+        else if (p >= 45) level = "050"
+        else if (p >= 35) level = "040"
+        else if (p >= 25) level = "030"
+        else if (p >= 15) level = "020"
+        else if (p > 5) level = "010"
+        return "battery-" + level + (battery.charging ? "-charging" : "")
+    }
+
+    // MSI EC announcements. The action is applied by the plugin; the capsule
+    // mirrors the requested state immediately and the plugin refreshes later.
+    function announceMsi(message, icon) {
+        root.msiMessage = message
+        root.msiIcon = icon || "weather-windy"
+        modeIndex = 15
+        eventTimer.restart()
+    }
+
+    function toggleMsiCoolerBoost() {
+        const next = !msi.coolerBoost
+        msi.setCoolerBoost(next)
+        root.announceMsi("Cooler Boost " + (next ? "on" : "off"), "weather-windy")
+    }
+
+    function cycleMsiFan() {
+        const modes = msi.availableFanModes
+        if (modes.length === 0) {
+            return
+        }
+        const current = modes.indexOf(msi.fanMode)
+        const next = modes[(current + 1) % modes.length]
+        msi.setFanMode(next)
+        root.announceMsi("Fan: " + next, "fan")
+    }
+
+    function cycleMsiShift() {
+        const modes = msi.availableShiftModes
+        if (modes.length === 0) {
+            return
+        }
+        const current = modes.indexOf(msi.shiftMode)
+        const next = modes[(current + 1) % modes.length]
+        msi.setShiftMode(next)
+        root.announceMsi("Shift: " + next, "speedometer")
+    }
+
+    function toggleMsiSuperBattery() {
+        const next = !msi.superBattery
+        msi.setSuperBattery(next)
+        root.announceMsi("Super Battery " + (next ? "on" : "off"), "battery-good")
+    }
+
+    function toggleMsiWebcam() {
+        const next = !msi.webcamBlocked
+        msi.setWebcamBlocked(next)
+        root.announceMsi("Webcam " + (next ? "blocked" : "enabled"), next ? "camera-off" : "camera-web")
+    }
+
+    function msiFanLabel() {
+        return "Fan " + (msi.fanMode || "?")
+    }
+
+    function msiShiftLabel() {
+        return "Shift " + (msi.shiftMode || "?")
     }
 
     // AC adapter plugged/unplugged. The capsule text is derived reactively from
     // the live state (batteryMessage), so it always shows the current values.
-    function updateBatteryAnnounce(charging) {
+    function updateBatteryAnnounce() {
         root.batteryLowShow = false
         root.batteryWarnHold = false
         batteryWarnHoldTimer.stop()
@@ -714,7 +899,7 @@ PlasmoidItem {
     // Critical battery (<= criticalThreshold): the capsule stays visible even
     // after the event timer expires. It only goes away when the AC adapter is
     // plugged back in, which flips critical off and runs the normal 3s announce.
-    function updateBatteryCritical(critical) {
+    function updateBatteryCritical() {
         root.batteryLowShow = false
         root.batteryWarnHold = false
         batteryWarnHoldTimer.stop()
@@ -781,6 +966,25 @@ PlasmoidItem {
         }
         function onVideoCountChanged() {
             root.updateCameraStatus(true)
+        }
+    }
+
+    // The MSI EC webcam kill switch does not create a udev event. The plugin
+    // refreshes on Fn hotkey events (and on popup open), so react to its state
+    // instead of scanning sysfs here.
+    Connections {
+        target: msi
+
+        function onWebcamBlockedChanged() {
+            root.updateCameraStatus(true)
+        }
+        function onAvailableChanged() {
+            root.updateCameraStatus(true)
+        }
+        function onLastErrorChanged() {
+            if (msi.lastError.length > 0) {
+                root.announceMsi(msi.lastError, "dialog-error")
+            }
         }
     }
 
@@ -855,13 +1059,13 @@ PlasmoidItem {
             arguments: []
         })
         reply.finished.connect(() => {
-            if (reply.isError) {
-                return
+            if (!reply.isError) {
+                const uuids = reply.value || []
+                for (let i = 0; i < uuids.length; i++) {
+                    root.watchTimer(uuids[i])
+                }
             }
-            const uuids = reply.value || []
-            for (let i = 0; i < uuids.length; i++) {
-                root.watchTimer(uuids[i])
-            }
+            reply.destroy()
         })
     }
 
@@ -883,13 +1087,8 @@ PlasmoidItem {
         // emits timerAdded — while this watcher is still being created, so those
         // signals can be lost and the first GetAll can catch running=false. Re-read
         // the settled state shortly after so a just-started timer never goes missing.
-        const retry = Qt.createQmlObject('import QtQuick; Timer {}', root)
-        retry.interval = 1200
-        retry.triggered.connect(() => {
-            retry.destroy()
-            root.syncTimerState(uuid)
-        })
-        retry.start()
+        timerSyncRetry.timerUuid = uuid
+        timerSyncRetry.restart()
     }
 
     function unwatchTimer(uuid) {
@@ -920,7 +1119,7 @@ PlasmoidItem {
         })
         reply.finished.connect(() => {
             if (reply.isError) {
-                console.warn("[timer] sync error", uuid, "->", reply.error.message)
+                reply.destroy()
                 return
             }
             const props = reply.value || {}
@@ -954,6 +1153,7 @@ PlasmoidItem {
                 end: tEnd * 1000,
                 pausedMs: pausedMs
             }
+            reply.destroy()
             root.recomputeTimers()
         })
     }
@@ -1008,7 +1208,6 @@ PlasmoidItem {
         root.timerFrozen = bestFrozen
         root.timerFrozenMs = bestFrozenMs
         root.timerCountUuid = hasCount ? bestUuid : ""
-        console.warn("[timer] recompute count=", hasCount, "frozen=", bestFrozen, "frozenMs=", bestFrozenMs, "end=", bestEnd, "ring=", ringingUuid)
     }
 
     // Toggle pause/resume or reset the active counting timer. No-arg D-Bus calls
@@ -1282,7 +1481,7 @@ PlasmoidItem {
         mainItem: Item {
             id: popupRootItem
             width: root.expandedWidth
-            height: root.expandedHeight + root.popupGapMargin
+            height: root.expandedHeight + root.popupGapTop + root.popupGapBottom
             opacity: root.popupOpen ? 1 : 0
             scale: root.popupOpen ? 1 : 0.92
 
@@ -1290,8 +1489,9 @@ PlasmoidItem {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
-                anchors.topMargin: root.popupGapMargin
-                height: root.expandedHeight
+                anchors.bottom: parent.bottom
+                anchors.topMargin: root.popupGapTop
+                anchors.bottomMargin: root.popupGapBottom
 
                 MouseArea {
                     id: popupMouseArea
@@ -1303,7 +1503,7 @@ PlasmoidItem {
                     // presses fall through to the content buttons below so that
                     // interacting with the expanded panel keeps it open instead
                     // of hiding on every click/hover.
-                    onPressed: mouse.accepted = false
+                    onPressed: (mouse) => mouse.accepted = false
                     onEntered: {
                         popupCloseTimer.stop()
                         popup.visible = true
@@ -1418,7 +1618,6 @@ PlasmoidItem {
                 visible: root.activeMode !== 0 && !root.showGreenDot && root.activeMode !== 14
                 mode: root.activeMode
                 iconName: root.notificationIcon
-                unread: root.unreadCount
                 opacity: root.activeMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
                 Layout.preferredWidth: 24
                 Layout.preferredHeight: 24
@@ -1474,7 +1673,7 @@ PlasmoidItem {
                 opacity: root.activeMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
                 font.pointSize: 12
                 font.weight: Font.Medium
-                elide: (activeMode === 0 || activeMode === 2) ? 1 : 0
+                elide: Text.ElideRight
                 Layout.preferredWidth: root.compactTextWidth
                 Layout.minimumWidth: 0
                 Layout.maximumWidth: root.compactTextWidth
@@ -1687,7 +1886,6 @@ PlasmoidItem {
                 height: 44
                 mode: 2
                 iconName: root.notificationIcon
-                unread: root.unreadCount
             }
 
             SoundBars {
@@ -1706,7 +1904,7 @@ PlasmoidItem {
                 anchors.leftMargin: 14
                 anchors.right: notifBars.left
                 anchors.rightMargin: 14
-                anchors.top: parent.top
+                anchors.top: notifRoot.hasActions ? parent.top : undefined
                 anchors.topMargin: notifRoot.hasActions ? 12 : 0
                 anchors.verticalCenter: notifRoot.hasActions ? undefined : parent.verticalCenter
                 spacing: 3
@@ -1781,7 +1979,6 @@ PlasmoidItem {
                 height: 44
                 mode: root.activeMode
                 iconName: root.notificationIcon
-                unread: root.unreadCount
                 opacity: root.activeMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
             }
 
@@ -1790,14 +1987,14 @@ PlasmoidItem {
                 anchors.leftMargin: 14
                 anchors.right: parent.right
                 anchors.rightMargin: 16
+                anchors.top: statusRoot.hasControls ? parent.top : undefined
+                anchors.topMargin: statusRoot.hasControls ? 14 : 0
                 anchors.verticalCenter: statusRoot.hasControls ? undefined : parent.verticalCenter
-                anchors.top: parent.top
-                anchors.topMargin: 14
                 spacing: 5
 
                 PlasmaComponents.Label {
                     width: parent.width
-                    text: root.activeMode === 3 ? (root.keyboardLongName || root.keyboardShortName || "Keyboard layout") : root.compactTitle
+                    text: root.activeMode === 3 ? (root.keyboardLongName || root.keyboardShortName || "Status") : root.compactTitle
                     color: root.textPrimary
                     opacity: root.activeMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
                     font.pointSize: 13
@@ -1805,22 +2002,43 @@ PlasmoidItem {
                     elide: Text.ElideRight
                 }
 
-                 PlasmaComponents.Label {
-                     width: parent.width
-                     text: root.activeMode === 1 ? "Volume" :
-                           root.activeMode === 3 ? "Keyboard layout" :
-                           root.activeMode === 4 ? "Pomodoro session in progress" :
-                           root.activeMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
-                           root.activeMode === 6 ? "Connected" :
-                           root.activeMode === 7 ? "Active capture or presentation mode" :
-                           root.activeMode === 8 ? (root.buildApp + (root.buildSuccess ? " · " + "success" : " · " + "failed")) :
-                           root.activeMode === 9 ? "Camera" :
-                           root.activeMode === 10 ? (root.micMuted ? "Microphone muted" : "Microphone active") :
-                           root.activeMode === 11 ? (root.timerRinging ? "Timer complete" : "Timer running") : "Status"
-                     color: root.textSecondary
-                     font.pointSize: 10
-                     elide: Text.ElideRight
-                 }
+                PlasmaComponents.Label {
+                    width: parent.width
+                    text: root.activeMode === 3 ? (msi.available ? "CPU " + msi.cpuTemp + "°C · GPU " + msi.gpuTemp + "°C" : "Status") :
+                          root.activeMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
+                          root.activeMode === 7 ? "Active capture or presentation mode" :
+                          root.activeMode === 8 ? (root.buildApp + (root.buildSuccess ? " · " + "success" : " · " + "failed")) :
+                          root.activeMode === 9 ? (root.cameraBlocked ? "Camera blocked by hardware switch" : "Camera") :
+                          root.activeMode === 10 ? (root.micMuted ? "Microphone muted" : "Microphone active") :
+                          root.activeMode === 11 ? (root.timerRinging ? "Timer complete" : "Timer running") :
+                          root.activeMode === 12 ? "Battery" :
+                          root.activeMode === 14 ? (root.volWatcher.muted ? "Muted" : "Volume") :
+                          root.activeMode === 15 ? "MSI EC" : "Status"
+                    color: root.textSecondary
+                    font.pointSize: 10
+                    elide: Text.ElideRight
+                }
+
+                // MSI controls are available in the idle popup. They are plain
+                // one-shot writes (sysfs or pkexec); no background service.
+                Row {
+                    visible: root.activeMode === 3 && msi.available && msi.canControl
+                    spacing: 6
+
+                    ActionPill {
+                        label: "Boost"
+                        active: msi.coolerBoost
+                        onTriggered: root.toggleMsiCoolerBoost()
+                    }
+                    ActionPill {
+                        label: root.msiFanLabel()
+                        onTriggered: root.cycleMsiFan()
+                    }
+                    ActionPill {
+                        label: root.msiShiftLabel()
+                        onTriggered: root.cycleMsiShift()
+                    }
+                }
 
                 Rectangle {
                     visible: statusRoot.hasProgress
@@ -1829,7 +2047,7 @@ PlasmoidItem {
                     radius: 3
                     color: Qt.rgba(1, 1, 1, 0.18)
 
-Rectangle {
+                    Rectangle {
                         width: parent.width * (root.activeMode === 8 ? (root.buildSuccess ? 1 : 0.4) :
                                                root.jobsPercent > 0 ? root.jobsPercent / 100 : 0.05)
                         height: parent.height
@@ -1874,44 +2092,43 @@ Rectangle {
 
     component StatusIcon: Item {
         property int mode: 0
-        property int unread: 0
         property string iconName: "notifications"
 
         Rectangle {
             anchors.fill: parent
             radius: width / 2
-            color: mode === 1 ? Qt.rgba(0.35, 0.42, 0.52, 0.35) :
-                   mode === 2 ? "#2da6e8" :
+            color: mode === 2 ? "#2da6e8" :
                    mode === 3 ? Qt.rgba(0.5, 0.56, 0.68, 0.38) :
-                   mode === 4 ? "#e84855" :
                    mode === 5 ? Qt.rgba(0.12, 0.6, 0.95, 0.34) :
-                   mode === 6 ? Qt.rgba(0.2, 0.9, 0.35, 0.24) :
                    mode === 7 ? Qt.rgba(0.25, 1, 0.15, 0.28) :
                    mode === 8 ? (root.buildSuccess ? Qt.rgba(0.33, 0.89, 0.41, 0.30) : Qt.rgba(0.92, 0.30, 0.36, 0.32)) :
                    mode === 9 ? (root.cameraAvailable ? Qt.rgba(0.2, 0.9, 0.5, 0.30) : Qt.rgba(0.92, 0.30, 0.36, 0.32)) :
                    mode === 10 ? (root.micMuted ? Qt.rgba(0.92, 0.30, 0.36, 0.32) : Qt.rgba(0.2, 0.9, 0.5, 0.30)) :
                    mode === 11 ? Qt.rgba(1, 0.62, 0.15, 0.34) :
-                    mode === 13 ? Qt.rgba(0.5, 0.7, 1, 0.35) :
-                    mode === 14 ? Qt.rgba(0.4, 0.8, 1, 0.35) :
-                    Qt.rgba(0.55, 0.4, 1, 0.3)
+                   mode === 12 ? (root.battery.percent <= 10 ? Qt.rgba(0.92, 0.30, 0.36, 0.32) :
+                                  root.battery.percent <= 20 ? Qt.rgba(1, 0.62, 0.15, 0.34) :
+                                  Qt.rgba(0.2, 0.9, 0.5, 0.30)) :
+                   mode === 13 ? Qt.rgba(0.5, 0.7, 1, 0.35) :
+                   mode === 14 ? Qt.rgba(0.4, 0.8, 1, 0.35) :
+                   mode === 15 ? Qt.rgba(1, 0.45, 0.2, 0.34) :
+                   Qt.rgba(0.55, 0.4, 1, 0.3)
 
             Kirigami.Icon {
                 anchors.centerIn: parent
                 width: parent.width * 0.62
                 height: width
-                source: mode === 1 ? "audio-volume-high" :
-                        mode === 2 ? iconName :
+                source: mode === 2 ? iconName :
                         mode === 3 ? "input-keyboard" :
-                        mode === 4 ? "chronometer" :
                         mode === 5 ? "download" :
-                        mode === 6 ? "security-high" :
                         mode === 7 ? "krfb" :
                         mode === 8 ? (root.buildSuccess ? "emblem-success" : "emblem-error") :
                         mode === 9 ? "camera-web" :
                         mode === 10 ? (root.micMuted ? "microphone-sensitivity-muted" : "microphone-sensitivity-high") :
                         mode === 11 ? "chronometer" :
+                        mode === 12 ? root.batteryIconName() :
                         mode === 13 ? root.lockIcon :
                         mode === 14 ? (root.volWatcher.muted ? "audio-volume-muted" : "audio-volume-high") :
+                        mode === 15 ? root.msiIcon :
                         "utilities-terminal"
             }
         }
@@ -1919,12 +2136,14 @@ Rectangle {
 
     component ActionPill: Rectangle {
         property string label: ""
+        property bool active: false
         signal triggered()
 
         height: 26
         width: pillLabel.implicitWidth + 24
         radius: height / 2
-        color: pillMouse.pressed ? Qt.lighter(root.accent, 1.15) : root.accent
+        color: pillMouse.pressed ? Qt.lighter(root.accent, 1.15)
+                                 : active ? Qt.rgba(0.2, 0.9, 0.5, 0.75) : root.accent
 
         PlasmaComponents.Label {
             id: pillLabel
@@ -1999,18 +2218,18 @@ Rectangle {
 
         property bool playing: false
 
-        spacing: 5
-        width: 44
-        height: 34
+        spacing: 3
+        width: 23
+        height: 26
 
         Repeater {
-            model: [18, 27, 14, 24, 20]
+            model: [14, 22, 10, 18, 16]
 
             Rectangle {
-                width: 4
+                width: 3
                 height: modelData
                 anchors.verticalCenter: parent.verticalCenter
-                radius: 2
+                radius: 1.5
                 color: root.textPrimary
                 opacity: soundBarsRoot.playing ? 0.9 : 0.55
                 transformOrigin: Item.Center

@@ -2,112 +2,176 @@
 #include <QQmlEngine>
 #include <QQmlExtensionPlugin>
 #include <QSocketNotifier>
+#include <QSet>
+#include <QString>
 #include <QTimer>
-#include <QDir>
-#include <QFileInfo>
-#include <QDebug>
 
-#include <sys/inotify.h>
-#include <dirent.h>
-#include <unistd.h>
-#include <cstdio>
+#include <libudev.h>
+
 #include <cstring>
 
-class CameraStatus : public QObject {
+// Event-driven webcam availability.
+//
+// udev is the source of truth: a monitor on the "video4linux" subsystem wakes
+// us only when a camera is added/removed, and enumeration filters out metadata
+// nodes such as /dev/video1 (ID_V4L_CAPABILITIES has no :capture:). The old
+// implementation counted every /dev/video* inode, so a metadata node made a
+// blocked/unplugged camera look present.
+class CameraStatus : public QObject
+{
     Q_OBJECT
     Q_PROPERTY(bool cameraAvailable READ cameraAvailable NOTIFY cameraAvailableChanged)
     Q_PROPERTY(int videoCount READ videoCount NOTIFY videoCountChanged)
+    Q_PROPERTY(QString cameraName READ cameraName NOTIFY cameraNameChanged)
 
 public:
     explicit CameraStatus(QObject *parent = nullptr)
         : QObject(parent)
     {
-        const QByteArray envDir = qgetenv("CAMSTATUS_WATCH_DIR");
-        m_watchDir = envDir.isEmpty() ? QStringLiteral("/dev") : QString::fromLocal8Bit(envDir);
-        m_count = countVideos();
-        m_inotifyFd = inotify_init1(IN_NONBLOCK);
-        if (m_inotifyFd >= 0) {
-            inotify_add_watch(m_inotifyFd, m_watchDir.toLocal8Bit().constData(),
-                              IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM);
-            m_notifier = new QSocketNotifier(m_inotifyFd, QSocketNotifier::Read, this);
-            connect(m_notifier, &QSocketNotifier::activated, this, &CameraStatus::onEvent);
+        m_udev = udev_new();
+        if (m_udev) {
+            m_monitor = udev_monitor_new_from_netlink(m_udev, "udev");
+            if (m_monitor) {
+                udev_monitor_filter_add_match_subsystem_devtype(m_monitor, "video4linux", nullptr);
+                udev_monitor_enable_receiving(m_monitor);
+                const int fd = udev_monitor_get_fd(m_monitor);
+                if (fd >= 0) {
+                    m_notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+                    connect(m_notifier, &QSocketNotifier::activated,
+                            this, &CameraStatus::onUdevEvent);
+                }
+            }
         }
-        reportState();
+        rescan();
     }
 
-    ~CameraStatus()
+    ~CameraStatus() override
     {
-        if (m_inotifyFd >= 0) {
-            close(m_inotifyFd);
+        delete m_notifier;
+        m_notifier = nullptr;
+        if (m_monitor) {
+            udev_monitor_unref(m_monitor);
+            m_monitor = nullptr;
+        }
+        if (m_udev) {
+            udev_unref(m_udev);
+            m_udev = nullptr;
         }
     }
 
     bool cameraAvailable() const { return m_count > 0; }
     int videoCount() const { return m_count; }
+    QString cameraName() const { return m_name; }
 
 signals:
     void cameraAvailableChanged();
     void videoCountChanged();
+    void cameraNameChanged();
 
 private slots:
-    void onEvent()
+    void onUdevEvent()
     {
-        char buf[4096];
-        while (read(m_inotifyFd, buf, sizeof(buf)) > 0) {
-            // drain all pending events
+        if (!m_monitor) {
+            return;
         }
-        QTimer::singleShot(0, this, &CameraStatus::rescan);
+        // Drain every queued event; one rescan after the batch is enough.
+        while (udev_device *device = udev_monitor_receive_device(m_monitor)) {
+            udev_device_unref(device);
+        }
+        rescan();
+    }
+
+private:
+    static bool isCaptureDevice(udev_device *device)
+    {
+        const char *caps = udev_device_get_property_value(device, "ID_V4L_CAPABILITIES");
+        if (!caps) {
+            return false;
+        }
+        return std::strstr(caps, ":capture:") != nullptr;
+    }
+
+    static QString deviceName(udev_device *device)
+    {
+        const char *product = udev_device_get_property_value(device, "ID_V4L_PRODUCT");
+        if (product && *product) {
+            return QString::fromUtf8(product);
+        }
+        const char *model = udev_device_get_property_value(device, "ID_MODEL");
+        if (model && *model) {
+            return QString::fromUtf8(model).replace(QLatin1Char('_'), QLatin1Char(' '));
+        }
+        return QString();
     }
 
     void rescan()
     {
-        const int n = countVideos();
-        if (n != m_count) {
-            m_count = n;
-            emit cameraAvailableChanged();
-            emit videoCountChanged();
-            reportState();
+        if (!m_udev) {
+            return;
+        }
+
+        QSet<QString> devices;
+        QString firstName;
+
+        udev_enumerate *enumerate = udev_enumerate_new(m_udev);
+        if (enumerate) {
+            udev_enumerate_add_match_subsystem(enumerate, "video4linux");
+            udev_enumerate_scan_devices(enumerate);
+
+            udev_list_entry *entries = udev_enumerate_get_list_entry(enumerate);
+            udev_list_entry *entry = nullptr;
+            udev_list_entry_foreach(entry, entries) {
+                const char *syspath = udev_list_entry_get_name(entry);
+                if (!syspath) {
+                    continue;
+                }
+                udev_device *device = udev_device_new_from_syspath(m_udev, syspath);
+                if (!device) {
+                    continue;
+                }
+                if (isCaptureDevice(device)) {
+                    const char *devnode = udev_device_get_devnode(device);
+                    if (devnode && *devnode) {
+                        devices.insert(QString::fromUtf8(devnode));
+                        if (firstName.isEmpty()) {
+                            firstName = deviceName(device);
+                        }
+                    }
+                }
+                udev_device_unref(device);
+            }
+            udev_enumerate_unref(enumerate);
+        }
+
+        const int count = devices.size();
+        const QString name = count > 0 ? firstName : QString();
+
+        if (count != m_count) {
+            m_count = count;
+            Q_EMIT videoCountChanged();
+            Q_EMIT cameraAvailableChanged();
+        }
+        if (name != m_name) {
+            m_name = name;
+            Q_EMIT cameraNameChanged();
         }
     }
 
-private:
-    int countVideos() const
-    {
-        int n = 0;
-        DIR *d = opendir(m_watchDir.toLocal8Bit().constData());
-        if (!d)
-            return 0;
-        struct dirent *e;
-        while ((e = readdir(d))) {
-            if (e->d_name[0] == '.')
-                continue;
-            if (strncmp(e->d_name, "video", 5) == 0 && e->d_type != DT_DIR && e->d_type != DT_LNK)
-                ++n;
-        }
-        closedir(d);
-        return n;
-    }
-
-    void reportState() const
-    {
-        qInfo() << "CameraStatus: watching" << m_watchDir << "videoCount=" << m_count
-                << "available=" << (m_count > 0);
-    }
-
-    int m_count = 0;
-    int m_inotifyFd = -1;
-    QString m_watchDir;
+    udev *m_udev = nullptr;
+    udev_monitor *m_monitor = nullptr;
     QSocketNotifier *m_notifier = nullptr;
+    int m_count = 0;
+    QString m_name;
 };
 
-class CameraStatusPlugin : public QQmlExtensionPlugin {
+class CameraStatusPlugin : public QQmlExtensionPlugin
+{
     Q_OBJECT
     Q_PLUGIN_METADATA(IID QQmlExtensionInterface_iid)
 
 public:
     void registerTypes(const char *uri) override
     {
-        Q_UNUSED(uri)
         qmlRegisterSingletonType<CameraStatus>(uri, 1, 0, "CameraStatus",
             [](QQmlEngine *, QJSEngine *) -> QObject * {
                 return new CameraStatus;

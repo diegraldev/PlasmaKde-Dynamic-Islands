@@ -4,3 +4,4 @@ plugins/**/*.so
 plugins/**/*.moc
 plugins/**/harness
 plugins/**/lib*.so
+plugins/**/moc_*.cpp
