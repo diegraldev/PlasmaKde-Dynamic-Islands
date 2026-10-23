@@ -1622,7 +1622,7 @@ PlasmoidItem {
         id: compactContentBlock
 
         RowLayout {
-            spacing: 8
+            spacing: 5
 
             Rectangle {
                 id: sharingDot
@@ -1639,14 +1639,8 @@ PlasmoidItem {
                 playing: root.mediaPlaying
                 levels: audioLevels.levels
                 reactive: audioLevels.ready
-                Layout.preferredWidth: 30
+                Layout.preferredWidth: 24
                 Layout.preferredHeight: 26
-            }
-
-            Item {
-                visible: root.activeMode === 0
-                Layout.preferredWidth: 6
-                Layout.preferredHeight: 1
             }
 
             MediaCompactIcon {
@@ -2263,8 +2257,8 @@ PlasmoidItem {
         property bool reactive: false
         property var levels: []
 
-        spacing: 3
-        width: 27
+        spacing: 2
+        width: 23
         height: 26
 
         Repeater {

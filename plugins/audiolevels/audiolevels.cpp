@@ -99,11 +99,19 @@ Q_SIGNALS:
 private:
     static constexpr int kSampleCount = 1024;
     static constexpr int kBandCount = 5;
-    // Typical spectral tilt of music measured on this machine. These are only
-    // starting points; each band adapts slowly to the current track.
-    static constexpr std::array<float, kBandCount> kDefaultCenters = {
-        -13.5f, -19.0f, -28.0f, -43.5f, -52.0f
+    // Fixed spectral calibration measured on representative music. Keeping
+    // these fixed (instead of auto-centering every band) preserves the
+    // difference between bass, mids and treble, so a normal song does not
+    // light every bar to the same height.
+    static constexpr std::array<float, kBandCount> kBandCenters = {
+        -9.5f, -15.2f, -21.8f, -37.1f, -48.7f
     };
+    // Slight downward target curve: bass has more energy, treble less, but
+    // every bar still moves around a useful part of its range.
+    static constexpr std::array<float, kBandCount> kBandTargets = {
+        0.62f, 0.56f, 0.52f, 0.48f, 0.44f
+    };
+    static constexpr float kBandSpanDb = 26.0f;
 
     void startPulse()
     {
@@ -156,7 +164,6 @@ private:
         m_targetSinkInputIndex = PA_INVALID_INDEX;
         m_samples.clear();
         m_smoothed.fill(0.0f);
-        m_bandCenter = kDefaultCenters;
         if (m_ready.exchange(false) && !m_destroying) {
             Q_EMIT readyChanged();
         }
@@ -424,7 +431,6 @@ private:
         m_sinkInputIndex = sinkInputIndex;
         m_samples.clear();
         m_smoothed.fill(0.0f);
-        m_bandCenter = kDefaultCenters;
 
         pa_sample_spec spec;
         spec.format = PA_SAMPLE_FLOAT32LE;
@@ -488,12 +494,13 @@ private:
                 // independent of the player's volume. A very loud bass-heavy
                 // track and the same track at 20% produce the same values.
                 const float relativeDb = bandDb - overallDb;
-                // Slow per-band center: each bar sits around half height and
-                // moves around its own long-term spectrum. The last band
-                // therefore moves as much as the bass band.
-                m_bandCenter[i] = m_bandCenter[i] * 0.99f + relativeDb * 0.01f;
-                const float delta = relativeDb - m_bandCenter[i];
-                const float normalized = std::clamp(0.5f + delta / 20.0f, 0.0f, 1.0f);
+                // Fixed calibration, not per-band auto-centering: a song with
+                // strong bass and weak treble should visibly look that way.
+                // The 26 dB span gives the bars room to move without pinning
+                // them at the top on ordinary playback.
+                const float normalized = std::clamp(
+                    kBandTargets[i] + (relativeDb - kBandCenters[i]) / kBandSpanDb,
+                    0.0f, 1.0f);
                 const float target = normalized * activity;
                 const float old = m_smoothed[i];
                 // Moderate attack/release: enough motion to follow beats,
@@ -508,16 +515,16 @@ private:
 
     void computeBands(const float *samples, std::array<float, kBandCount> &out) const
     {
-        // Six probes per visual band, spread over a full octave or more.
-        // The bands are log-spaced from bass to treble, so the last bar is
-        // not tied to one rare high tone. Taking the strongest probe keeps
-        // the display honest without a full FFT.
+        // Six probes per visual band, spread over roughly 1.5 octaves.
+        // The ranges follow the useful parts of a music mix: sub-bass/bass,
+        // low mids, mids, presence and treble. A pure tone now mainly lifts
+        // its own bar instead of every bar at once.
         static constexpr std::array<std::array<float, 6>, kBandCount> frequencies = {{
-            {{40.0f, 55.0f, 75.0f, 100.0f, 130.0f, 170.0f}},
-            {{180.0f, 230.0f, 290.0f, 370.0f, 470.0f, 600.0f}},
-            {{500.0f, 650.0f, 850.0f, 1100.0f, 1450.0f, 1900.0f}},
-            {{2200.0f, 2800.0f, 3400.0f, 4100.0f, 4900.0f, 5800.0f}},
-            {{6500.0f, 8000.0f, 9500.0f, 11000.0f, 12500.0f, 14500.0f}}
+            {{40.0f, 55.0f, 75.0f, 100.0f, 125.0f, 160.0f}},
+            {{180.0f, 230.0f, 290.0f, 370.0f, 470.0f, 550.0f}},
+            {{600.0f, 750.0f, 950.0f, 1200.0f, 1450.0f, 1700.0f}},
+            {{1800.0f, 2300.0f, 2900.0f, 3600.0f, 4500.0f, 5600.0f}},
+            {{6500.0f, 8000.0f, 9500.0f, 11000.0f, 13000.0f, 15000.0f}}
         }};
         static constexpr float pi = 3.14159265358979323846f;
         static const std::array<float, kSampleCount> window = [] {
@@ -529,7 +536,7 @@ private:
         }();
 
         for (int band = 0; band < kBandCount; ++band) {
-            float best = 0.0f;
+            float energy = 0.0f;
             for (float frequency : frequencies[band]) {
                 const float omega = 2.0f * pi * frequency / 44100.0f;
                 const float coeff = 2.0f * std::cos(omega);
@@ -542,9 +549,9 @@ private:
                     s1 = s0;
                 }
                 const float power = std::max(0.0f, s1 * s1 + s2 * s2 - coeff * s1 * s2);
-                best = std::max(best, std::sqrt(power) / kSampleCount);
+                energy += power / (kSampleCount * kSampleCount);
             }
-            out[band] = best;
+            out[band] = std::sqrt(energy);
         }
     }
 
@@ -600,7 +607,6 @@ private:
     QString m_mediaIdentity;
     std::vector<float> m_samples;
     std::array<float, kBandCount> m_smoothed{};
-    std::array<float, kBandCount> m_bandCenter = kDefaultCenters;
     QVariantList m_levels;
     QElapsedTimer m_emitTimer;
     std::atomic<bool> m_running{false};

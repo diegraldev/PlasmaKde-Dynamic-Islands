@@ -21,8 +21,10 @@ hardware-specific integrations for an MSI Pulse GL66 11UGKV (MS-1581).
   monitor. The stream is opened only while media is playing.
 - Bars use five log-spaced bands from bass to treble and normalize each band
   against the broadband level, so changing the player volume does not change
-  the bar heights. The expanded music panel shows only cover, title, progress
-  and transport controls; the animated bars live in the compact capsule.
+  the bar heights. A fixed spectral calibration and a wide 26 dB range keep
+  bass, mids and treble visually distinct instead of lighting every bar to the
+  same height. The expanded music panel shows only cover, title, progress and
+  transport controls; the animated bars live in the compact capsule.
 - Camera presence from udev (`video4linux` capture devices only), with a
   hardware-blocked state from MSI EC.
 - MSI EC controls: Cooler Boost, fan mode, shift mode, Super Battery and the
