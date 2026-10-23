@@ -80,7 +80,7 @@ itself when nothing is playing) to open the read-only status panel.
 - CPU usage and package temperature.
 - GPU usage and temperature through a minimal dynamically loaded **NVML**
   binding — no `nvidia-smi` subprocess.
-- RAM usage with used/total GB.
+- RAM usage with the used amount only.
 - Battery percentage and charging state.
 - The `SystemStats` sampler runs only while the popup is open and stops when it
   closes.
@@ -216,6 +216,28 @@ Apart from the short status-popup sampler, everything is event driven. There is
 no polling daemon, no persistent helper process and no `pactl` subprocess.
 PulseAudio, udev, D-Bus and input events drive the state changes directly.
 
+## Performance
+
+The applet is designed to stay quiet when nothing is happening. It is
+event-driven: PulseAudio, UPower, udev, D-Bus, KWin and MSI WMI signals drive
+the state, not background polling loops.
+
+The only periodic work is deliberately small and scoped:
+
+| Work | When it runs | Cost |
+| --- | --- | --- |
+| Clock tick | One wake-up per minute while idle; 1 Hz only when seconds, a countdown or an open media popup needs it. | Negligible. |
+| Status sampler | 1 Hz only while the system status popup is open. | Reads `/proc/stat`, `/proc/meminfo` and NVML, then stops and unloads NVML when the popup closes. |
+| Timer blink | 450 ms only while a KClock timer is ringing. | Tiny; stops when ringing ends. |
+| Bar fallback animation | Only while media is playing without real audio levels yet. | Replaced by real levels as soon as the monitor stream is ready. |
+| One-shot timers | Popup close, MSI refresh, battery resync, build/notification expiry, reconnect retries. | Milliseconds, only after a real event. |
+
+There is no polling daemon, no persistent helper process and no `pactl`
+subprocess. The audio stream is opened only while media is playing and closed
+on pause. If you want to trim the last bit of work, the status sampler can be
+changed from 1 Hz to 1.5–2 Hz in `plugins/systemstats/systemstats.cpp`; the
+difference is only noticeable in how quickly the dashboard reacts.
+
 ## Known limitations
 
 - GPU metrics currently use NVML, so they are NVIDIA-only. AMD/Intel support
@@ -264,6 +286,7 @@ Things that would fit naturally in future versions:
 
 | Tag | Highlights |
 | --- | --- |
+| `v1.5.4` | Compact status tiles, RAM used-only readout and a right gutter for the capsule. |
 | `v1.5.3` | Status panel cleanup, popup edge protection, public fork README. |
 | `v1.5.2` | CPU/GPU/RAM/battery status tiles and stricter bar calibration. |
 | `v1.5.1` | Wider bar range, musical band split and tighter compact spacing. |

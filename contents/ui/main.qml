@@ -131,10 +131,18 @@ PlasmoidItem {
     }
     readonly property int compactContentWidth: compactLeadingWidth + compactTextWidth + compactTrailingWidth + compactGapWidth + compactSeparatorsWidth
     readonly property int compactWidth: Math.max(compactMinWidth, Math.min(compactMaxWidth, compactContentWidth + compactSidePadding * 2))
+    // Transparent gutter on the right of the capsule. The applet itself is at
+    // the right end of the panel, so this is what keeps the island from being
+    // visually glued to the screen edge.
+    readonly property int compactRightMargin: 16
+    readonly property int compactOuterWidth: compactWidth + compactRightMargin
+    // Keep the status dashboard compact. Above 300 px the two-column tiles
+    // leave a large dead gap between the value and its detail.
+    readonly property int statusPopupWidth: Math.max(280, Math.min(Plasmoid.configuration.expandedWidthStatus, 300))
     readonly property int expandedWidth: displayMode === 0 ? Plasmoid.configuration.expandedWidthMusic
         : displayMode === 2 ? Plasmoid.configuration.expandedWidthNotification
         : displayMode === 3
-            ? Math.max(Plasmoid.configuration.expandedWidthStatus, 380)
+            ? statusPopupWidth
             : Plasmoid.configuration.expandedWidthStatus
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
@@ -405,11 +413,11 @@ PlasmoidItem {
         return m + ":" + String(s).padStart(2, "0")
     }
 
-    Layout.minimumWidth: compactWidth
+    Layout.minimumWidth: compactOuterWidth
     Layout.minimumHeight: compactHeight
-    Layout.preferredWidth: compactWidth
+    Layout.preferredWidth: compactOuterWidth
     Layout.preferredHeight: compactHeight
-    Layout.maximumWidth: compactWidth
+    Layout.maximumWidth: compactOuterWidth
     Layout.maximumHeight: compactHeight
 
     implicitWidth: Layout.preferredWidth
@@ -686,16 +694,16 @@ PlasmoidItem {
     }
 
     // PlasmaCore.Dialog centres the popup on its visual parent. The island sits
-    // at the far right of the panel, so a 340/380 px popup would extend past the
+    // at the far right of the panel, so a 300/340 px popup would extend past the
     // screen edge. Shift an invisible anchor left just enough to keep the popup
     // inside the screen, with a small breathing margin on both sides.
-    readonly property int popupScreenMargin: 12
+    readonly property int popupScreenMargin: 16
     readonly property real popupHorizontalShift: {
         const geo = Plasmoid.screenGeometry
         if (geo === null || geo === undefined || root.width <= 0) {
             return 0
         }
-        const center = root.mapToGlobal(Qt.point(root.width / 2, 0)).x
+        const center = root.mapToGlobal(Qt.point(root.width - root.compactRightMargin - root.compactWidth / 2, 0)).x
         const half = root.expandedWidth / 2
         const minCenter = geo.x + popupScreenMargin + half
         const maxCenter = geo.x + geo.width - popupScreenMargin - half
@@ -1524,7 +1532,9 @@ PlasmoidItem {
     Rectangle {
         id: island
 
-        anchors.centerIn: parent
+        anchors.right: parent.right
+        anchors.rightMargin: root.compactRightMargin
+        anchors.verticalCenter: parent.verticalCenter
         width: root.compactWidth
         height: root.compactHeight
         radius: height / 2
@@ -1545,7 +1555,7 @@ PlasmoidItem {
         id: popupAnchor
         width: root.width
         height: root.height
-        x: -root.popupHorizontalShift
+        x: -root.popupHorizontalShift - root.compactRightMargin / 2
         y: 0
     }
 
@@ -2122,8 +2132,8 @@ PlasmoidItem {
                     StatusMetric {
                         label: "RAM"
                         value: systemStats.ramPercent + "%"
-                        detail: systemStats.ramTotalGb > 0
-                            ? systemStats.ramUsedGb.toFixed(1) + " / " + systemStats.ramTotalGb.toFixed(1) + " GB"
+                        detail: systemStats.ramUsedGb > 0
+                            ? systemStats.ramUsedGb.toFixed(1) + " GB"
                             : ""
                     }
                     StatusMetric {
@@ -2200,9 +2210,9 @@ PlasmoidItem {
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 9
-            anchors.rightMargin: 9
-            spacing: 6
+            anchors.leftMargin: 10
+            anchors.rightMargin: 12
+            spacing: 5
 
             Column {
                 Layout.fillWidth: true
