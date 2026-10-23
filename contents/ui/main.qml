@@ -133,9 +133,7 @@ PlasmoidItem {
     readonly property int compactWidth: Math.max(compactMinWidth, Math.min(compactMaxWidth, compactContentWidth + compactSidePadding * 2))
     readonly property int expandedWidth: displayMode === 0 ? Plasmoid.configuration.expandedWidthMusic
         : displayMode === 2 ? Plasmoid.configuration.expandedWidthNotification
-        : displayMode === 3
-            ? Math.min(Plasmoid.configuration.expandedWidthStatus, 300)
-            : Plasmoid.configuration.expandedWidthStatus
+        : Plasmoid.configuration.expandedWidthStatus
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
         const cfg = Plasmoid.configuration.expandedHeight
@@ -690,6 +688,16 @@ PlasmoidItem {
     // screen edge. Shift an invisible anchor left just enough to keep the popup
     // inside the screen, with a small breathing margin on both sides.
     readonly property int popupScreenMargin: 16
+    readonly property real popupMaxRightMargin: 16
+    // Responsive cap: never wider than the space from island center to screen right
+    readonly property int popupMaxWidth: {
+        const geo = Plasmoid.screenGeometry
+        if (!geo || root.width <= 0 || root.mapToGlobal === undefined) return root.expandedWidth
+        const center = root.mapToGlobal(Qt.point(root.width / 2, 0)).x
+        const screenRight = geo.x + geo.width
+        const avail = screenRight - center - popupMaxRightMargin
+        return Math.max(200, Math.min(root.expandedWidth, Math.floor(avail * 2)))
+    }
     readonly property real popupHorizontalShift: {
         const geo = Plasmoid.screenGeometry
         if (geo === null || geo === undefined || root.width <= 0) {
@@ -1573,7 +1581,7 @@ PlasmoidItem {
 
         mainItem: Item {
             id: popupRootItem
-            width: root.expandedWidth
+            width: root.popupMaxWidth
             height: root.expandedHeight + root.popupGapTop + root.popupGapBottom
             opacity: root.popupOpen ? 1 : 0
             scale: root.popupOpen ? 1 : 0.92
