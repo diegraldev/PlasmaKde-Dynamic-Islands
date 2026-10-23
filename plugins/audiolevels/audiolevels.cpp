@@ -1,9 +1,11 @@
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QObject>
 #include <QQmlEngine>
 #include <QQmlExtensionPlugin>
 #include <QTimer>
+#include <QString>
 #include <QVariantList>
 
 #include <pulse/pulseaudio.h>
@@ -17,16 +19,19 @@
 
 // Event-driven audio spectrum for the compact media capsule.
 //
-// It records the default sink's monitor source through libpulse and exposes
-// five smoothed band levels. The stream exists only while `running` is true
-// (QML ties it to media playback), so idle cost is zero and there is no
-// subprocess, no polling timer and no file recording.
+// It records the active MPRIS player's sink input through libpulse when the
+// player identity can be matched, and falls back to the default sink monitor.
+// The five bands are normalized against the broadband level, so the display
+// follows the spectral shape rather than the player's volume. The stream
+// exists only while `running` is true (QML ties it to media playback), so idle
+// cost is zero and there is no subprocess, no polling timer and no recording.
 class AudioLevels : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool running READ running WRITE setRunning NOTIFY runningChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
     Q_PROPERTY(QVariantList levels READ levels NOTIFY levelsChanged)
+    Q_PROPERTY(QString mediaIdentity READ mediaIdentity WRITE setMediaIdentity NOTIFY mediaIdentityChanged)
 
 public:
     explicit AudioLevels(QObject *parent = nullptr)
@@ -49,6 +54,7 @@ public:
     bool running() const { return m_running.load(); }
     bool ready() const { return m_ready.load(); }
     QVariantList levels() const { return m_levels; }
+    QString mediaIdentity() const { return m_mediaIdentity; }
 
 public Q_SLOTS:
     void setRunning(bool running)
@@ -65,14 +71,39 @@ public Q_SLOTS:
         Q_EMIT runningChanged();
     }
 
+    void setMediaIdentity(const QString &identity)
+    {
+        if (m_mediaIdentity == identity) {
+            return;
+        }
+        // The identity is read from the PulseAudio thread while it resolves
+        // sink inputs, so update it under the threaded-mainloop lock when the
+        // connection is alive.
+        if (m_loop) {
+            pa_threaded_mainloop_lock(m_loop);
+            m_mediaIdentity = identity;
+            pa_threaded_mainloop_unlock(m_loop);
+        } else {
+            m_mediaIdentity = identity;
+        }
+        Q_EMIT mediaIdentityChanged();
+        requestRefresh();
+    }
+
 Q_SIGNALS:
     void runningChanged();
     void readyChanged();
     void levelsChanged();
+    void mediaIdentityChanged();
 
 private:
     static constexpr int kSampleCount = 1024;
     static constexpr int kBandCount = 5;
+    // Typical spectral tilt of music measured on this machine. These are only
+    // starting points; each band adapts slowly to the current track.
+    static constexpr std::array<float, kBandCount> kDefaultCenters = {
+        -13.5f, -19.0f, -28.0f, -43.5f, -52.0f
+    };
 
     void startPulse()
     {
@@ -121,8 +152,11 @@ private:
         pa_threaded_mainloop_free(m_loop);
         m_loop = nullptr;
         m_monitorSource.clear();
+        m_sinkInputIndex = PA_INVALID_INDEX;
+        m_targetSinkInputIndex = PA_INVALID_INDEX;
         m_samples.clear();
         m_smoothed.fill(0.0f);
+        m_bandCenter = kDefaultCenters;
         if (m_ready.exchange(false) && !m_destroying) {
             Q_EMIT readyChanged();
         }
@@ -161,7 +195,8 @@ private:
             {
                 pa_operation *op = pa_context_subscribe(
                     c, static_cast<pa_subscription_mask_t>(
-                           PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SERVER),
+                           PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SERVER
+                           | PA_SUBSCRIPTION_MASK_SINK_INPUT),
                     nullptr, nullptr);
                 if (op) {
                     pa_operation_unref(op);
@@ -183,7 +218,9 @@ private:
         AudioLevels *self = static_cast<AudioLevels *>(userdata);
         const auto facility = static_cast<pa_subscription_event_type_t>(
             t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK);
-        if (facility == PA_SUBSCRIPTION_EVENT_SINK || facility == PA_SUBSCRIPTION_EVENT_SERVER) {
+        if (facility == PA_SUBSCRIPTION_EVENT_SINK
+            || facility == PA_SUBSCRIPTION_EVENT_SERVER
+            || facility == PA_SUBSCRIPTION_EVENT_SINK_INPUT) {
             self->requestServerInfo();
         }
     }
@@ -195,10 +232,35 @@ private:
             self->publishReady(false);
             return;
         }
-        pa_operation *op = pa_context_get_sink_info_by_name(
-            c, info->default_sink_name, &AudioLevels::sinkInfoCb, self);
-        if (op) {
-            pa_operation_unref(op);
+        self->m_defaultSinkName = info->default_sink_name;
+        self->requestSinkInputList(c);
+    }
+
+    static void sinkInputInfoCb(pa_context *c, const pa_sink_input_info *info, int eol, void *userdata)
+    {
+        AudioLevels *self = static_cast<AudioLevels *>(userdata);
+        if (eol) {
+            if (self->m_matchedSinkInputIndex != PA_INVALID_INDEX) {
+                self->m_targetSinkInputIndex = self->m_matchedSinkInputIndex;
+                pa_operation *op = pa_context_get_sink_info_by_index(
+                    c, self->m_matchedSinkIndex, &AudioLevels::sinkInfoCb, self);
+                if (op) {
+                    pa_operation_unref(op);
+                }
+            } else {
+                self->requestDefaultSinkInfo(c);
+            }
+            return;
+        }
+        if (!info || !self->matchesIdentity(info)) {
+            return;
+        }
+        // Prefer a running stream over a corked one when an application has
+        // more than one sink input.
+        if (self->m_matchedSinkInputIndex == PA_INVALID_INDEX || (self->m_matchedCorked && !info->corked)) {
+            self->m_matchedSinkInputIndex = info->index;
+            self->m_matchedSinkIndex = info->sink;
+            self->m_matchedCorked = info->corked != 0;
         }
     }
 
@@ -212,7 +274,7 @@ private:
             self->publishReady(false);
             return;
         }
-        self->ensureStream(info->monitor_source_name);
+        self->ensureStream(info->monitor_source_name, self->m_targetSinkInputIndex);
     }
 
     static void streamStateCb(pa_stream *stream, void *userdata)
@@ -256,6 +318,17 @@ private:
         }
     }
 
+    void requestRefresh()
+    {
+        if (!m_loop || !m_context) {
+            return;
+        }
+        pa_threaded_mainloop_lock(m_loop);
+        requestServerInfo();
+        pa_threaded_mainloop_unlock(m_loop);
+    }
+
+    // Called with the threaded mainloop locked.
     void requestServerInfo()
     {
         if (!m_context) {
@@ -267,13 +340,79 @@ private:
         }
     }
 
-    void ensureStream(const char *source)
+    void requestSinkInputList(pa_context *c)
+    {
+        m_matchedSinkInputIndex = PA_INVALID_INDEX;
+        m_matchedSinkIndex = PA_INVALID_INDEX;
+        m_matchedCorked = true;
+        if (normalizedIdentity(m_mediaIdentity).isEmpty()) {
+            requestDefaultSinkInfo(c);
+            return;
+        }
+        pa_operation *op = pa_context_get_sink_input_info_list(
+            c, &AudioLevels::sinkInputInfoCb, this);
+        if (op) {
+            pa_operation_unref(op);
+        }
+    }
+
+    void requestDefaultSinkInfo(pa_context *c)
+    {
+        m_targetSinkInputIndex = PA_INVALID_INDEX;
+        if (m_defaultSinkName.isEmpty()) {
+            publishReady(false);
+            return;
+        }
+        pa_operation *op = pa_context_get_sink_info_by_name(
+            c, m_defaultSinkName.constData(), &AudioLevels::sinkInfoCb, this);
+        if (op) {
+            pa_operation_unref(op);
+        }
+    }
+
+    static QString normalizedIdentity(const QString &value)
+    {
+        QString out;
+        out.reserve(value.size());
+        for (const QChar ch : value) {
+            if (ch.isLetterOrNumber()) {
+                out.append(ch.toLower());
+            }
+        }
+        return out;
+    }
+
+    bool matchesIdentity(const pa_sink_input_info *info) const
+    {
+        if (!info || !info->proplist) {
+            return false;
+        }
+        const QString wanted = normalizedIdentity(m_mediaIdentity);
+        if (wanted.isEmpty()) {
+            return false;
+        }
+        const auto matchesKey = [&wanted](const char *key, pa_proplist *proplist) {
+            const char *value = pa_proplist_gets(proplist, key);
+            if (!value || !*value) {
+                return false;
+            }
+            const QString normalized = normalizedIdentity(QString::fromUtf8(value));
+            return !normalized.isEmpty()
+                && (normalized == wanted || normalized.contains(wanted)
+                    || wanted.contains(normalized));
+        };
+        return matchesKey(PA_PROP_APPLICATION_NAME, info->proplist)
+            || matchesKey(PA_PROP_APPLICATION_PROCESS_BINARY, info->proplist)
+            || matchesKey(PA_PROP_MEDIA_NAME, info->proplist);
+    }
+
+    void ensureStream(const char *source, uint32_t sinkInputIndex)
     {
         if (!source || !*source) {
             publishReady(false);
             return;
         }
-        if (m_stream && m_monitorSource == source) {
+        if (m_stream && m_monitorSource == source && m_sinkInputIndex == sinkInputIndex) {
             return;
         }
         if (m_stream) {
@@ -282,8 +421,10 @@ private:
             m_stream = nullptr;
         }
         m_monitorSource = source;
+        m_sinkInputIndex = sinkInputIndex;
         m_samples.clear();
         m_smoothed.fill(0.0f);
+        m_bandCenter = kDefaultCenters;
 
         pa_sample_spec spec;
         spec.format = PA_SAMPLE_FLOAT32LE;
@@ -296,6 +437,14 @@ private:
         }
         pa_stream_set_state_callback(m_stream, &AudioLevels::streamStateCb, this);
         pa_stream_set_read_callback(m_stream, &AudioLevels::readCb, this);
+        if (m_sinkInputIndex != PA_INVALID_INDEX) {
+            // Capture only the active media player's sink input instead of the
+            // whole default-sink mix. If the server rejects the monitor-stream
+            // hint, keep the general monitor as a safe fallback.
+            if (pa_stream_set_monitor_stream(m_stream, m_sinkInputIndex) < 0) {
+                m_sinkInputIndex = PA_INVALID_INDEX;
+            }
+        }
         // Keep the monitor latency close to one analysis window (~23 ms). The
         // default record fragsize can be seconds long, which makes the bars
         // look frozen even though they are reading real audio.
@@ -318,13 +467,39 @@ private:
         while (m_samples.size() >= static_cast<size_t>(kSampleCount)) {
             std::array<float, kBandCount> bands;
             computeBands(m_samples.data(), bands);
+
+            float sumSquares = 0.0f;
+            for (int i = 0; i < kSampleCount; ++i) {
+                sumSquares += m_samples[i] * m_samples[i];
+            }
+            const float overallRms = std::sqrt(sumSquares / kSampleCount);
+            const float overallDb = 20.0f * std::log10(overallRms + 1.0e-7f);
+            // Only the overall level decides whether the player is silent.
+            // It must not scale the bars: the band values below are relative
+            // to the overall level, so 10% and 100% volume look the same.
+            // Keep the gate well below normal listening levels, so lowering
+            // the player volume does not shrink the bars. It only mutes them
+            // when the stream is effectively silent.
+            const float activity = std::clamp((overallDb + 95.0f) / 20.0f, 0.0f, 1.0f);
+
             for (int i = 0; i < kBandCount; ++i) {
-                const float target = bands[i];
+                const float bandDb = 20.0f * std::log10(bands[i] + 1.0e-7f);
+                // Subtract the broadband level: this is the spectral shape,
+                // independent of the player's volume. A very loud bass-heavy
+                // track and the same track at 20% produce the same values.
+                const float relativeDb = bandDb - overallDb;
+                // Slow per-band center: each bar sits around half height and
+                // moves around its own long-term spectrum. The last band
+                // therefore moves as much as the bass band.
+                m_bandCenter[i] = m_bandCenter[i] * 0.99f + relativeDb * 0.01f;
+                const float delta = relativeDb - m_bandCenter[i];
+                const float normalized = std::clamp(0.5f + delta / 20.0f, 0.0f, 1.0f);
+                const float target = normalized * activity;
                 const float old = m_smoothed[i];
-                // Fast attack, slow release: the bars jump on transients and
-                // settle naturally instead of flickering at 60 Hz.
-                m_smoothed[i] = target > old ? old + (target - old) * 0.65f
-                                             : old + (target - old) * 0.16f;
+                // Moderate attack/release: enough motion to follow beats,
+                // without the previous saturated, pinned-to-the-top look.
+                m_smoothed[i] = target > old ? old + (target - old) * 0.55f
+                                             : old + (target - old) * 0.20f;
             }
             publishLevels();
             m_samples.erase(m_samples.begin(), m_samples.begin() + kSampleCount);
@@ -333,15 +508,16 @@ private:
 
     void computeBands(const float *samples, std::array<float, kBandCount> &out) const
     {
-        // Three probes per visual band. A single probe per band makes a pure
-        // note that falls between two probes nearly invisible; taking the
-        // strongest probe keeps the display honest without a full FFT.
-        static constexpr std::array<std::array<float, 3>, kBandCount> frequencies = {{
-            {{60.0f, 90.0f, 120.0f}},
-            {{150.0f, 220.0f, 300.0f}},
-            {{350.0f, 440.0f, 550.0f}},
-            {{700.0f, 880.0f, 1100.0f}},
-            {{1400.0f, 1800.0f, 2400.0f}}
+        // Six probes per visual band, spread over a full octave or more.
+        // The bands are log-spaced from bass to treble, so the last bar is
+        // not tied to one rare high tone. Taking the strongest probe keeps
+        // the display honest without a full FFT.
+        static constexpr std::array<std::array<float, 6>, kBandCount> frequencies = {{
+            {{40.0f, 55.0f, 75.0f, 100.0f, 130.0f, 170.0f}},
+            {{180.0f, 230.0f, 290.0f, 370.0f, 470.0f, 600.0f}},
+            {{500.0f, 650.0f, 850.0f, 1100.0f, 1450.0f, 1900.0f}},
+            {{2200.0f, 2800.0f, 3400.0f, 4100.0f, 4900.0f, 5800.0f}},
+            {{6500.0f, 8000.0f, 9500.0f, 11000.0f, 12500.0f, 14500.0f}}
         }};
         static constexpr float pi = 3.14159265358979323846f;
         static const std::array<float, kSampleCount> window = [] {
@@ -368,8 +544,7 @@ private:
                 const float power = std::max(0.0f, s1 * s1 + s2 * s2 - coeff * s1 * s2);
                 best = std::max(best, std::sqrt(power) / kSampleCount);
             }
-            const float db = 20.0f * std::log10(best + 1.0e-7f);
-            out[band] = std::clamp((db + 58.0f) / 58.0f, 0.0f, 1.0f);
+            out[band] = best;
         }
     }
 
@@ -416,8 +591,16 @@ private:
     pa_context *m_context = nullptr;
     pa_stream *m_stream = nullptr;
     std::string m_monitorSource;
+    uint32_t m_sinkInputIndex = PA_INVALID_INDEX;
+    uint32_t m_targetSinkInputIndex = PA_INVALID_INDEX;
+    uint32_t m_matchedSinkInputIndex = PA_INVALID_INDEX;
+    uint32_t m_matchedSinkIndex = PA_INVALID_INDEX;
+    bool m_matchedCorked = true;
+    QByteArray m_defaultSinkName;
+    QString m_mediaIdentity;
     std::vector<float> m_samples;
     std::array<float, kBandCount> m_smoothed{};
+    std::array<float, kBandCount> m_bandCenter = kDefaultCenters;
     QVariantList m_levels;
     QElapsedTimer m_emitTimer;
     std::atomic<bool> m_running{false};

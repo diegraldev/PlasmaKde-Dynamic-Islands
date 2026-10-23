@@ -29,6 +29,10 @@ PlasmoidItem {
     AudioLevels {
         id: audioLevels
         running: root.enableMedia && root.mediaPlaying
+        // The plugin isolates the active MPRIS player's PulseAudio sink input
+        // when it can match the identity; otherwise it falls back to the
+        // default sink monitor.
+        mediaIdentity: root.mediaIdentity
     }
 
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
@@ -52,7 +56,7 @@ PlasmoidItem {
             onTriggered: root.cycleMsiFan()
         },
         PlasmaCore.Action {
-            text: "Shift mode: " + (msi.shiftMode || "unknown")
+            text: "Shift mode: " + root.msiShiftName(msi.shiftMode)
             icon.name: "speedometer"
             visible: msi.available
             enabled: msi.canControl && msi.availableShiftModes.length > 0
@@ -119,19 +123,19 @@ PlasmoidItem {
     }
     readonly property int compactContentWidth: compactLeadingWidth + compactTextWidth + compactTrailingWidth + compactGapWidth + compactSeparatorsWidth
     readonly property int compactWidth: Math.max(compactMinWidth, Math.min(compactMaxWidth, compactContentWidth + compactSidePadding * 2))
-    readonly property int expandedWidth: activeMode === 0 ? Plasmoid.configuration.expandedWidthMusic
-        : activeMode === 2 ? Plasmoid.configuration.expandedWidthNotification
-        : activeMode === 3 && msi.available && msi.canControl
+    readonly property int expandedWidth: displayMode === 0 ? Plasmoid.configuration.expandedWidthMusic
+        : displayMode === 2 ? Plasmoid.configuration.expandedWidthNotification
+        : displayMode === 3 && msi.available && msi.canControl
             ? Math.max(Plasmoid.configuration.expandedWidthStatus, 380)
             : Plasmoid.configuration.expandedWidthStatus
     readonly property int compactHeight: 32
     readonly property int expandedHeight: {
         const cfg = Plasmoid.configuration.expandedHeight
-        if (activeMode === 3 && msi.available && msi.canControl) {
+        if (displayMode === 3 && msi.available && msi.canControl) {
             // The idle popup also hosts the MSI control pills.
             return Math.max(cfg, 96)
         }
-        if (activeMode !== 11 || !timerHasCount) return cfg
+        if (displayMode !== 11 || !timerHasCount) return cfg
         // A running timer draws an extra row of icon controls along the bottom.
         // Keep the panel at the configured height whenever it already fits under
         // the status icon, only growing for very small panels.
@@ -286,6 +290,11 @@ PlasmoidItem {
 
     property int modeIndex: 0
     property bool popupOpen: false
+    // While the popup is open, this can pin the expanded content to music (0)
+    // or to the normal status/MSI panel (3), independently of the compact
+    // capsule's active mode. -1 follows activeMode.
+    property int popupPanelMode: -1
+    readonly property int displayMode: popupOpen && popupPanelMode >= 0 ? popupPanelMode : activeMode
     property int mediaStatus: Mpris.PlaybackStatus.Stopped
     property int unreadCount: 0
     property int jobsCount: 0
@@ -681,8 +690,9 @@ PlasmoidItem {
         onActivated: root.closePopup()
     }
 
-    function openPopup() {
+    function openPopup(panelMode) {
         popupCloseTimer.stop()
+        popupPanelMode = (panelMode === undefined || panelMode === null) ? -1 : panelMode
         // One-shot refresh of the MSI snapshot (temperatures, fan mode, webcam
         // switch). No periodic polling; the plugin also refreshes on Fn keys.
         msi.refresh()
@@ -692,6 +702,7 @@ PlasmoidItem {
 
     function closePopup() {
         popupOpen = false
+        popupPanelMode = -1
         popupCloseTimer.restart()
     }
 
@@ -843,15 +854,29 @@ PlasmoidItem {
         root.announceMsi("Fan: " + next, "fan")
     }
 
+    function msiShiftName(mode) {
+        // MControlCenter calls the same MSI EC values Performance/Balanced/
+        // Powersave. Keep the raw sysfs value internal and show the familiar
+        // names in the capsule.
+        if (mode === "turbo") return "Performance"
+        if (mode === "comfort") return "Balanced"
+        if (mode === "eco") return "Powersave"
+        return mode || "unknown"
+    }
+
     function cycleMsiShift() {
-        const modes = msi.availableShiftModes
+        const preferred = ["turbo", "comfort", "eco"]
+        let modes = preferred.filter(mode => msi.availableShiftModes.indexOf(mode) !== -1)
+        if (modes.length === 0) {
+            modes = msi.availableShiftModes
+        }
         if (modes.length === 0) {
             return
         }
         const current = modes.indexOf(msi.shiftMode)
         const next = modes[(current + 1) % modes.length]
         msi.setShiftMode(next)
-        root.announceMsi("Shift: " + next, "speedometer")
+        root.announceMsi("Shift: " + root.msiShiftName(next), "speedometer")
     }
 
     function toggleMsiSuperBattery() {
@@ -871,7 +896,7 @@ PlasmoidItem {
     }
 
     function msiShiftLabel() {
-        return "Shift " + (msi.shiftMode || "?")
+        return "Shift " + root.msiShiftName(msi.shiftMode)
     }
 
     // AC adapter plugged/unplugged. The capsule text is derived reactively from
@@ -1443,7 +1468,21 @@ PlasmoidItem {
                 root.dismissTimer()
                 return
             }
-            root.togglePopup()
+            if (root.popupOpen) {
+                root.closePopup()
+                return
+            }
+            // When media is playing, the left part of the capsule (cover,
+            // title) opens the music panel and the right part (clock) opens
+            // the normal status/MSI panel. Any other state keeps the usual
+            // context-dependent popup.
+            if (root.showMedia) {
+                const timeWidth = Math.ceil(compactTimeMetrics.width)
+                const timeLeft = island.x + island.width - timeWidth - root.compactSidePadding - 6
+                root.openPopup(mouse.x >= timeLeft ? 3 : 0)
+            } else {
+                root.openPopup(-1)
+            }
         }
         onWheel: (wheel) => root.handleWheel(wheel.angleDelta.y)
     }
@@ -1485,6 +1524,7 @@ PlasmoidItem {
             if (!visible) {
                 popupCloseTimer.stop()
                 root.popupOpen = false
+                root.popupPanelMode = -1
             }
         }
 
@@ -1730,8 +1770,8 @@ PlasmoidItem {
             Loader {
                 anchors.fill: parent
                 sourceComponent: {
-                    if (root.activeMode === 0) return musicExpanded
-                    if (root.activeMode === 2) return notificationExpanded
+                    if (root.displayMode === 0) return musicExpanded
+                    if (root.displayMode === 2) return notificationExpanded
                     return statusExpanded
                 }
             }
@@ -1770,19 +1810,6 @@ PlasmoidItem {
                     width: 30
                     height: 30
                 }
-            }
-
-            SoundBars {
-                id: musicBars
-                anchors.left: musicArt.right
-                anchors.leftMargin: 12
-                anchors.top: parent.top
-                anchors.topMargin: 16
-                width: 38
-                height: 28
-                playing: root.mediaPlaying
-                levels: audioLevels.levels
-                reactive: audioLevels.ready
             }
 
             Row {
@@ -1835,8 +1862,8 @@ PlasmoidItem {
 
             PlasmaComponents.Label {
                 id: musicTitle
-                anchors.left: musicBars.right
-                anchors.leftMargin: 12
+                anchors.left: musicArt.right
+                anchors.leftMargin: 16
                 anchors.right: parent.right
                 anchors.rightMargin: 16
                 anchors.top: parent.top
@@ -1849,8 +1876,8 @@ PlasmoidItem {
             }
 
             PlasmaComponents.Label {
-                anchors.left: musicBars.right
-                anchors.leftMargin: 12
+                anchors.left: musicArt.right
+                anchors.leftMargin: 16
                 anchors.right: parent.right
                 anchors.rightMargin: 16
                 anchors.top: musicTitle.bottom
@@ -1981,8 +2008,8 @@ PlasmoidItem {
             id: statusRoot
             anchors.fill: parent
 
-            readonly property bool hasProgress: root.activeMode === 5 || root.activeMode === 8
-            readonly property bool hasControls: root.activeMode === 11 && (root.timerHasCount || root.timerRinging)
+            readonly property bool hasProgress: root.displayMode === 5 || root.displayMode === 8
+            readonly property bool hasControls: root.displayMode === 11 && (root.timerHasCount || root.timerRinging)
 
             StatusIcon {
                 id: statusIcon
@@ -1991,9 +2018,9 @@ PlasmoidItem {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 44
                 height: 44
-                mode: root.activeMode
+                mode: root.displayMode
                 iconName: root.notificationIcon
-                opacity: root.activeMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
+                opacity: root.displayMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
             }
 
             Column {
@@ -2008,9 +2035,11 @@ PlasmoidItem {
 
                 PlasmaComponents.Label {
                     width: parent.width
-                    text: root.activeMode === 3 ? (root.keyboardLongName || root.keyboardShortName || "Status") : root.compactTitle
+                    text: root.displayMode === 3
+                        ? (root.activeMode === 3 ? (root.keyboardLongName || root.keyboardShortName || "Status") : "Status")
+                        : root.compactTitle
                     color: root.textPrimary
-                    opacity: root.activeMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
+                    opacity: root.displayMode === 11 && root.timerRinging ? (root.timerBlinkOn ? 1 : 0.3) : 1
                     font.pointSize: 13
                     font.weight: Font.Medium
                     elide: Text.ElideRight
@@ -2018,16 +2047,16 @@ PlasmoidItem {
 
                 PlasmaComponents.Label {
                     width: parent.width
-                    text: root.activeMode === 3 ? (msi.available ? "CPU " + msi.cpuTemp + "°C · GPU " + msi.gpuTemp + "°C" : "Status") :
-                          root.activeMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
-                          root.activeMode === 7 ? "Active capture or presentation mode" :
-                          root.activeMode === 8 ? (root.buildApp + (root.buildSuccess ? " · " + "success" : " · " + "failed")) :
-                          root.activeMode === 9 ? (root.cameraBlocked ? "Camera blocked by hardware switch" : "Camera") :
-                          root.activeMode === 10 ? (root.micMuted ? "Microphone muted" : "Microphone active") :
-                          root.activeMode === 11 ? (root.timerRinging ? "Timer complete" : "Timer running") :
-                          root.activeMode === 12 ? "Battery" :
-                          root.activeMode === 14 ? (root.volWatcher.muted ? "Muted" : "Volume") :
-                          root.activeMode === 15 ? "MSI EC" : "Status"
+                    text: root.displayMode === 3 ? (msi.available ? "CPU " + msi.cpuTemp + "°C · GPU " + msi.gpuTemp + "°C" : "Status") :
+                          root.displayMode === 5 ? (root.jobsCount > 0 ? "%1% complete".arg(root.jobsPercent) : "No active downloads") :
+                          root.displayMode === 7 ? "Active capture or presentation mode" :
+                          root.displayMode === 8 ? (root.buildApp + (root.buildSuccess ? " · " + "success" : " · " + "failed")) :
+                          root.displayMode === 9 ? (root.cameraBlocked ? "Camera blocked by hardware switch" : "Camera") :
+                          root.displayMode === 10 ? (root.micMuted ? "Microphone muted" : "Microphone active") :
+                          root.displayMode === 11 ? (root.timerRinging ? "Timer complete" : "Timer running") :
+                          root.displayMode === 12 ? "Battery" :
+                          root.displayMode === 14 ? (root.volWatcher.muted ? "Muted" : "Volume") :
+                          root.displayMode === 15 ? "MSI EC" : "Status"
                     color: root.textSecondary
                     font.pointSize: 10
                     elide: Text.ElideRight
@@ -2036,7 +2065,7 @@ PlasmoidItem {
                 // MSI controls are available in the idle popup. They are plain
                 // one-shot writes (sysfs or pkexec); no background service.
                 Row {
-                    visible: root.activeMode === 3 && msi.available && msi.canControl
+                    visible: root.displayMode === 3 && msi.available && msi.canControl
                     spacing: 6
 
                     ActionPill {
@@ -2062,11 +2091,11 @@ PlasmoidItem {
                     color: Qt.rgba(1, 1, 1, 0.18)
 
                     Rectangle {
-                        width: parent.width * (root.activeMode === 8 ? (root.buildSuccess ? 1 : 0.4) :
+                        width: parent.width * (root.displayMode === 8 ? (root.buildSuccess ? 1 : 0.4) :
                                                root.jobsPercent > 0 ? root.jobsPercent / 100 : 0.05)
                         height: parent.height
                         radius: parent.radius
-                        color: root.activeMode === 8 ? (root.buildSuccess ? "#55e36a" : "#ff4f6f") : root.accent
+                        color: root.displayMode === 8 ? (root.buildSuccess ? "#55e36a" : "#ff4f6f") : root.accent
                     }
                 }
             }
@@ -2081,22 +2110,22 @@ PlasmoidItem {
                 spacing: 8
 
                 IconPill {
-                    visible: root.activeMode === 11 && root.timerHasCount
+                    visible: root.displayMode === 11 && root.timerHasCount
                     iconName: root.timerFrozen ? "chronometer-start" : "chronometer-pause"
                     onTriggered: root.timerControl("toggleRunning")
                 }
                 IconPill {
-                    visible: root.activeMode === 11 && root.timerHasCount
+                    visible: root.displayMode === 11 && root.timerHasCount
                     iconName: "chronometer-reset"
                     onTriggered: root.timerReset()
                 }
                 IconPill {
-                    visible: root.activeMode === 11 && root.timerRinging
+                    visible: root.displayMode === 11 && root.timerRinging
                     iconName: "media-playback-stop"
                     onTriggered: root.dismissTimer()
                 }
                 IconPill {
-                    visible: root.activeMode === 11 && (root.timerHasCount || root.timerRinging)
+                    visible: root.displayMode === 11 && (root.timerHasCount || root.timerRinging)
                     iconName: "dialog-close"
                     onTriggered: root.timerDelete()
                 }
@@ -2256,7 +2285,7 @@ PlasmoidItem {
 
                 Behavior on height {
                     enabled: soundBarsRoot.reactive
-                    NumberAnimation { duration: 70; easing.type: Easing.OutQuad }
+                    NumberAnimation { duration: 45; easing.type: Easing.OutQuad }
                 }
 
                 // Fallback when no monitor stream is ready: a lightweight
