@@ -318,6 +318,10 @@ Things that would fit naturally in future versions:
 
 | Tag | Highlights |
 | --- | --- |
+| `v1.5.8` | Sharing-dot width fix, Cava-style audio bars and the touchpad capsule. |
+| `v1.5.7` | Right-pinned popup anchor shared by media and status. |
+| `v1.5.6` | Responsive popup width capped by the available screen space. |
+| `v1.5.5` | Status popup cleanup, narrower cards and the restored compact capsule. |
 | `v1.5.4` | Compact status tiles, RAM used-only readout and a right gutter for the capsule. |
 | `v1.5.3` | Status panel cleanup, popup edge protection, public fork README. |
 | `v1.5.2` | CPU/GPU/RAM/battery status tiles and stricter bar calibration. |

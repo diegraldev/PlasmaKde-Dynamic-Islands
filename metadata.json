@@ -15,7 +15,7 @@
         "License": "MIT",
         "Name": "Dynamic Island",
         "Website": "https://github.com/diegraldev/PlasmaKde-Dynamic-Islands",
-        "Version": "1.5.4"
+        "Version": "1.5.8"
     },
     "KPackageStructure": "Plasma/Applet",
     "X-Plasma-API-Minimum-Version": "6.0"
