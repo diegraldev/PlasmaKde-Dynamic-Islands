@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <string>
 #include <vector>
 
@@ -99,23 +100,40 @@ Q_SIGNALS:
     void mediaIdentityChanged();
 
 private:
-    static constexpr int kSampleCount = 1024;
+    static constexpr int kFftSize = 2048;
+    static constexpr int kHopSize = 1024;
     static constexpr int kBandCount = 5;
-    // Fixed spectral calibration measured on representative music. Keeping
-    // these fixed (instead of auto-centering every band) preserves the
-    // difference between bass, mids and treble, so a normal song does not
-    // light every bar to the same height.
+
+    struct BandRange {
+        float low;
+        float high;
+    };
+
+    // Contiguous, roughly equal-octave bands. Covering the whole range (instead
+    // of six sparse probes) means no tone can fall between two probes, and the
+    // FFT gives a stable spectral estimate for every band.
+    static constexpr std::array<BandRange, kBandCount> kBandRanges = {{
+        {40.0f, 160.0f},
+        {160.0f, 500.0f},
+        {500.0f, 1600.0f},
+        {1600.0f, 5000.0f},
+        {5000.0f, 16000.0f}
+    }};
+    // Fixed calibration measured on real music with the FFT analyser. The
+    // centres follow the natural roll-off of a mix, and the per-band spans
+    // compensate for the wider dynamic range of the treble bands, so every bar
+    // moves across most of its height instead of the upper bands sitting at 0.
     static constexpr std::array<float, kBandCount> kBandCenters = {
-        -9.5f, -15.2f, -21.8f, -37.1f, -48.7f
+        -17.0f, -21.5f, -33.0f, -43.5f, -56.5f
     };
-    // Deliberately conservative target curve: a normal mix sits around these
-    // heights, while a bar only reaches the top for a genuinely dominant tone
-    // in its own range. Bass therefore needs a near-solo bass hit, and treble
-    // needs a much stronger high-frequency transient than ordinary music.
-    static constexpr std::array<float, kBandCount> kBandTargets = {
-        0.48f, 0.44f, 0.40f, 0.36f, 0.32f
+    static constexpr std::array<float, kBandCount> kBandSpans = {
+        20.0f, 22.0f, 32.0f, 36.0f, 44.0f
     };
-    static constexpr float kBandSpanDb = 38.0f;
+    // Slow per-band reference (about 30 s) with a bounded correction, so a very
+    // bass-heavy or very bright track still fills the bars without flattening
+    // the difference between bands.
+    static constexpr float kReferenceAlpha = 0.0008f;
+    static constexpr float kReferenceClampDb = 8.0f;
 
     void startPulse()
     {
@@ -169,6 +187,8 @@ private:
         m_samples.clear();
         m_smoothed.fill(0.0f);
         m_peaks.fill(0.0f);
+        m_reference = kBandCenters;
+        m_referenceReady = false;
         if (m_ready.exchange(false) && !m_destroying) {
             Q_EMIT readyChanged();
         }
@@ -437,6 +457,8 @@ private:
         m_samples.clear();
         m_smoothed.fill(0.0f);
         m_peaks.fill(0.0f);
+        m_reference = kBandCenters;
+        m_referenceReady = false;
 
         pa_sample_spec spec;
         spec.format = PA_SAMPLE_FLOAT32LE;
@@ -476,15 +498,17 @@ private:
     void processSamples(const float *data, size_t count)
     {
         m_samples.insert(m_samples.end(), data, data + count);
-        while (m_samples.size() >= static_cast<size_t>(kSampleCount)) {
+        // 2048-sample FFT with a 1024-sample hop (50 % overlap): enough bass
+        // resolution for the 40-160 Hz band while keeping the latency low.
+        while (m_samples.size() >= static_cast<size_t>(kFftSize)) {
             std::array<float, kBandCount> bands;
             computeBands(m_samples.data(), bands);
 
             float sumSquares = 0.0f;
-            for (int i = 0; i < kSampleCount; ++i) {
+            for (int i = 0; i < kFftSize; ++i) {
                 sumSquares += m_samples[i] * m_samples[i];
             }
-            const float overallRms = std::sqrt(sumSquares / kSampleCount);
+            const float overallRms = std::sqrt(sumSquares / kFftSize);
             const float overallDb = 20.0f * std::log10(overallRms + 1.0e-7f);
             // Only the overall level decides whether the player is silent.
             // It must not scale the bars: the band values below are relative
@@ -492,7 +516,16 @@ private:
             // Keep the gate well below normal listening levels, so lowering
             // the player volume does not shrink the bars. It only mutes them
             // when the stream is effectively silent.
-            const float activity = std::clamp((overallDb + 95.0f) / 20.0f, 0.0f, 1.0f);
+            const float activity = std::clamp((overallDb + 85.0f) / 20.0f, 0.0f, 1.0f);
+
+            // Adapt the per-band reference only on normal-level audio, so a
+            // quiet intro cannot pull the reference down and make the next
+            // loud section saturate.
+            const bool adaptReference = overallDb > -50.0f;
+            if (adaptReference && !m_referenceReady) {
+                m_reference = kBandCenters;
+                m_referenceReady = true;
+            }
 
             for (int i = 0; i < kBandCount; ++i) {
                 const float bandDb = 20.0f * std::log10(bands[i] + 1.0e-7f);
@@ -500,13 +533,18 @@ private:
                 // independent of the player's volume. A very loud bass-heavy
                 // track and the same track at 20% produce the same values.
                 const float relativeDb = bandDb - overallDb;
-                // Fixed calibration, not per-band auto-centering: a song with
-                // strong bass and weak treble should visibly look that way.
-                // The 38 dB span keeps ordinary playback in the lower/middle
-                // part of each bar; reaching 1.0 needs a dominant band.
+                if (adaptReference) {
+                    m_reference[i] += (relativeDb - m_reference[i]) * kReferenceAlpha;
+                    m_reference[i] = std::clamp(m_reference[i],
+                                                kBandCenters[i] - kReferenceClampDb,
+                                                kBandCenters[i] + kReferenceClampDb);
+                }
+                const float reference = m_referenceReady ? m_reference[i] : kBandCenters[i];
+                // Per-band spans keep every bar lively: the treble bands have a
+                // much wider natural dynamic range than the bass, so a single
+                // span would leave them near zero on ordinary music.
                 const float normalized = std::clamp(
-                    kBandTargets[i] + (relativeDb - kBandCenters[i]) / kBandSpanDb,
-                    0.0f, 1.0f);
+                    0.5f + (relativeDb - reference) / kBandSpans[i], 0.0f, 1.0f);
                 const float target = normalized * activity;
                 const float old = m_smoothed[i];
                 // Fast attack, slower release with a constant gravity term.
@@ -531,49 +569,85 @@ private:
                 }
             }
             publishLevels();
-            m_samples.erase(m_samples.begin(), m_samples.begin() + kSampleCount);
+            m_samples.erase(m_samples.begin(), m_samples.begin() + kHopSize);
         }
     }
 
-    void computeBands(const float *samples, std::array<float, kBandCount> &out) const
+    // In-place iterative radix-2 FFT.
+    static void fft(std::vector<std::complex<float>> &a)
     {
-        // Six probes per visual band, spread over roughly 1.5 octaves.
-        // The ranges follow the useful parts of a music mix: sub-bass/bass,
-        // low mids, mids, presence and treble. A pure tone now mainly lifts
-        // its own bar instead of every bar at once.
-        static constexpr std::array<std::array<float, 6>, kBandCount> frequencies = {{
-            {{40.0f, 55.0f, 75.0f, 100.0f, 125.0f, 160.0f}},
-            {{180.0f, 230.0f, 290.0f, 370.0f, 470.0f, 550.0f}},
-            {{600.0f, 750.0f, 950.0f, 1200.0f, 1450.0f, 1700.0f}},
-            {{1800.0f, 2300.0f, 2900.0f, 3600.0f, 4500.0f, 5600.0f}},
-            {{6500.0f, 8000.0f, 9500.0f, 11000.0f, 13000.0f, 15000.0f}}
-        }};
-        static constexpr float pi = 3.14159265358979323846f;
-        static const std::array<float, kSampleCount> window = [] {
-            std::array<float, kSampleCount> values{};
-            for (int i = 0; i < kSampleCount; ++i) {
-                values[i] = 0.5f - 0.5f * std::cos(2.0f * pi * i / (kSampleCount - 1));
+        const int n = static_cast<int>(a.size());
+        for (int i = 1, j = 0; i < n; ++i) {
+            int bit = n >> 1;
+            for (; j & bit; bit >>= 1) {
+                j ^= bit;
+            }
+            j ^= bit;
+            if (i < j) {
+                std::swap(a[i], a[j]);
+            }
+        }
+        static const std::array<std::complex<float>, kFftSize / 2> twiddles = [] {
+            std::array<std::complex<float>, kFftSize / 2> table{};
+            constexpr float pi = 3.14159265358979323846f;
+            for (int i = 0; i < kFftSize / 2; ++i) {
+                const float angle = -2.0f * pi * i / kFftSize;
+                table[i] = std::complex<float>(std::cos(angle), std::sin(angle));
+            }
+            return table;
+        }();
+        for (int len = 2; len <= n; len <<= 1) {
+            const int half = len / 2;
+            const int step = n / len;
+            for (int i = 0; i < n; i += len) {
+                for (int j = 0; j < half; ++j) {
+                    const std::complex<float> u = a[i + j];
+                    const std::complex<float> v = a[i + j + half] * twiddles[j * step];
+                    a[i + j] = u + v;
+                    a[i + j + half] = u - v;
+                }
+            }
+        }
+    }
+
+    void computeBands(const float *samples, std::array<float, kBandCount> &out)
+    {
+        static const std::array<float, kFftSize> window = [] {
+            std::array<float, kFftSize> values{};
+            constexpr float pi = 3.14159265358979323846f;
+            for (int i = 0; i < kFftSize; ++i) {
+                values[i] = 0.5f - 0.5f * std::cos(2.0f * pi * i / (kFftSize - 1));
             }
             return values;
         }();
 
+        for (int i = 0; i < kFftSize; ++i) {
+            m_fft[i] = std::complex<float>(window[i] * samples[i], 0.0f);
+        }
+        fft(m_fft);
+
+        // Hann window power gain: mean(w^2) = 3/8. The mean power per bin is
+        // used instead of the total band power so a wider treble band does not
+        // automatically outrank the narrow bass band.
+        constexpr float windowPower = 0.375f;
+        constexpr float sampleRate = 44100.0f;
+        constexpr double fftScale = static_cast<double>(kFftSize) * kFftSize;
+
         for (int band = 0; band < kBandCount; ++band) {
-            float energy = 0.0f;
-            for (float frequency : frequencies[band]) {
-                const float omega = 2.0f * pi * frequency / 44100.0f;
-                const float coeff = 2.0f * std::cos(omega);
-                float s0 = 0.0f;
-                float s1 = 0.0f;
-                float s2 = 0.0f;
-                for (int i = 0; i < kSampleCount; ++i) {
-                    s0 = window[i] * samples[i] + coeff * s1 - s2;
-                    s2 = s1;
-                    s1 = s0;
-                }
-                const float power = std::max(0.0f, s1 * s1 + s2 * s2 - coeff * s1 * s2);
-                energy += power / (kSampleCount * kSampleCount);
+            int low = static_cast<int>(std::ceil(kBandRanges[band].low * kFftSize / sampleRate));
+            int high = static_cast<int>(std::floor(kBandRanges[band].high * kFftSize / sampleRate));
+            low = std::max(1, low);
+            high = std::min(kFftSize / 2 - 1, high);
+            if (high < low) {
+                high = low;
             }
-            out[band] = std::sqrt(energy);
+            double power = 0.0;
+            for (int k = low; k <= high; ++k) {
+                power += std::norm(m_fft[k]);
+            }
+            const int bins = high - low + 1;
+            const double meanPower = power / fftScale / windowPower / bins;
+            out[band] = static_cast<float>(std::sqrt(meanPower));
         }
     }
 
@@ -634,8 +708,11 @@ private:
     QByteArray m_defaultSinkName;
     QString m_mediaIdentity;
     std::vector<float> m_samples;
+    std::vector<std::complex<float>> m_fft = std::vector<std::complex<float>>(kFftSize);
     std::array<float, kBandCount> m_smoothed{};
     std::array<float, kBandCount> m_peaks{};
+    std::array<float, kBandCount> m_reference{};
+    bool m_referenceReady = false;
     QVariantList m_levels;
     QVariantList m_peaksList;
     QElapsedTimer m_emitTimer;

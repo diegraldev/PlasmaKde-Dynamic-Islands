@@ -66,13 +66,21 @@ PulseAudio stream while media is playing and closes it on pause.
 - It tries to match the active MPRIS player to its own PulseAudio sink input, so
   other applications normally do not drive the bars.
 - If no sink input can be matched, it falls back to the default sink monitor.
-- Five log-spaced bands cover bass through treble:
-  `40–160`, `180–550`, `600–1700`, `1800–5600` and `6500–15000 Hz`.
+- Five contiguous, roughly equal-octave bands cover the whole mix:
+  `40–160`, `160–500`, `500–1600`, `1600–5000` and `5000–16000 Hz`.
+  A 2048-point FFT with a Hann window and a 1024-sample hop replaces the old
+  sparse probes, so a tone can no longer fall between two probes and every band
+  gets a stable spectral estimate.
 - Each band is normalized against the broadband level. That makes the heights
   independent of the player volume.
-- A fixed spectral calibration and a deliberately wide **38 dB** range keep
-  ordinary playback in the lower/middle part of each bar. A bar only reaches
-  the top when its own frequency range is genuinely dominant.
+- The FFT uses the mean power per bin, and every band has its own dB span, so
+  the naturally wider dynamic range of the treble does not leave the upper bars
+  near zero. A slow (about 30 s), bounded per-band reference adapts to very
+  bass-heavy or very bright tracks without flattening the difference between
+  bands.
+- A noise/activity gate keeps the bars at zero when the stream is silent, while
+  staying far below normal listening levels so lowering the volume does not
+  shrink them.
 - The bars use a fast attack and a slower release with a constant gravity term,
   so they follow beats and still fall smoothly instead of sticking near the top.
   A small peak-hold cap falls on its own for the Cava-style look.
@@ -325,6 +333,7 @@ Things that would fit naturally in future versions:
 
 | Tag | Highlights |
 | --- | --- |
+| `v1.6.1` | FFT spectrum analyser with contiguous log bands, per-band spans and slow autosens. |
 | `v1.6.0` | Five selectable audio-bar skins: Classic, Mirror, Dots, Wave and Neon. |
 | `v1.5.8` | Sharing-dot width fix, Cava-style audio bars and the touchpad capsule. |
 | `v1.5.7` | Right-pinned popup anchor shared by media and status. |
