@@ -30,6 +30,9 @@ every day:
   announces state changes made from anywhere (Fn keys, MControlCenter,
   scripts), driven by inotify on the EC sysfs attributes plus the MSI WMI
   hotkey device — zero polling.
+- **Touchpad capsule**: the Fn key is remapped from the firmware's dead
+  `Ctrl+Meta+F24` shortcut to a real toggle (self-healing keymap + KWin input
+  DBus), so the island announces the actual state with a check/cross badge.
 - **Right-pinned popup**: one parent window whose width never depends on the
   active mode; the visible panel hangs from a fixed right pivot and only grows
   leftward, so music, notification and status popouts share the same right edge.
@@ -47,6 +50,7 @@ every day:
 | Volume | PulseAudio/PipeWire volume and mute changes, with a compact slider while the change is announced. |
 | Microphone | Default-source mute state from PulseAudio/PipeWire. |
 | Camera | udev video4linux presence plus the MSI hardware-blocked state. |
+| Touchpad | Fn-key toggle with the real KWin state (input DBus + scancode remap), announced with a black panel glyph and a green check / red cross badge. |
 | Screen sharing | Active capture/presentation indicator. |
 | Downloads | Progress and completion state for active jobs. |
 | IDE builds | Build app, success/failure and progress. |
