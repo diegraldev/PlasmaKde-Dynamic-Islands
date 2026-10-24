@@ -675,31 +675,12 @@ PlasmoidItem {
     // edge is the fixed pivot and it only ever grows leftward, whatever its
     // width is.
     readonly property int popupPanelWidth: Math.min(root.expandedWidth, root.popupWindowWidth)
-    // Plasma clamps the popup window flush against the screen's right edge,
-    // but the capsule (and the floating panel bar around it) stops short of
-    // that edge. Offset the visible panel by the same distance so its right
-    // edge hangs level with the capsule/bar instead of touching the screen
-    // border.
-    readonly property real popupPanelRightMargin: {
-        // Re-evaluate when the popup opens so a panel moved at runtime is
-        // measured fresh (mapToGlobal is not a notifiable property).
-        const open = root.popupOpen
-        const geo = Plasmoid.screenGeometry
-        if (!geo || root.width <= 0 || root.mapToGlobal === undefined || !open) {
-            return root.popupRightMargin
-        }
-        const islandRight = root.mapToGlobal(Qt.point(root.width, 0)).x
-        const gap = (geo.x + geo.width) - islandRight
-        // A gap beyond a sane bound means the island is not at the screen's
-        // right end (Plasma would centre the window, not clamp it) — keep the
-        // plain breathing margin then.
-        if (gap < 0 || gap > 200) {
-            return root.popupRightMargin
-        }
-        // Align the panel's right edge with the floating panel bar's end:
-        // the bar sits ~9px inboard of the applet's right edge.
-        return Math.max(4, gap - 9)
-    }
+    // Manual knob: space between the popout panel's right edge and the
+    // screen's right edge. The popup window is clamped flush against the
+    // screen's right edge, so this constant moves the panel directly:
+    // lower = closer to the floating panel bar, higher = more room on the
+    // right. 8 lines the panel up with the bar on this setup.
+    readonly property int popupPanelRightMargin: 8
 
     Timer {
         id: popupCloseTimer
