@@ -257,7 +257,6 @@ PlasmoidItem {
             return eventTimer.running ? root.msiMessage : ""
         }
         if (activeMode === 16) {
-            console.warn("[TP] compactTitle mode16, timer:", eventTimer.running, "state:", root.touchpadEnabled)
             return eventTimer.running ? (root.touchpadEnabled ? "Touchpad on" : "Touchpad off") : ""
         }
         return ""
@@ -1069,12 +1068,21 @@ PlasmoidItem {
         // announce immediately — no async read sits between the key event
         // and the capsule. The settle timer afterwards silently re-reads
         // KWin as a drift correction.
+        // Fn touchpad hotkey. The EC sends the Ctrl+Meta+F24 shortcut TWICE
+        // per physical press, so coalesce the burst. The event window must
+        // be armed BEFORE the mode flips: switching the compact capsule to a
+        // different width makes the panel applet resize synchronously, and
+        // that cascade must not be able to leave the announcement without
+        // its 3s window.
         function onTouchpadToggle() {
+            if (tpDebounce.running) {
+                return
+            }
+            tpDebounce.restart()
             root.touchpadEnabled = !root.touchpadEnabled
             root.touchpadReady = true
-            console.warn("[TP] toggle -> announce, state:", root.touchpadEnabled)
-            root.modeIndex = 16
             root.eventTimer.restart()
+            root.modeIndex = 16
             touchpadSettleTimer.restart()
         }
         function onWebcamBlockedChanged() {
@@ -1105,6 +1113,12 @@ PlasmoidItem {
         id: touchpadSettleTimer
         interval: 150
         onTriggered: root.syncTouchpadEnabled(false)
+    }
+
+    // The EC keyboard burst sends the touchpad shortcut twice per press.
+    Timer {
+        id: tpDebounce
+        interval: 80
     }
 
     // One PropertiesChanged watcher per discovered touchpad node (some laptops
