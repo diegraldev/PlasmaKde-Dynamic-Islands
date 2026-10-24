@@ -440,10 +440,21 @@ private:
         // KEY_TOUCHPAD_TOGGLE after the hwdb remap. Watch the stable by-path
         // node and ignore everything else — no key is ever logged.
         static const char kPath[] = "/dev/input/by-path/platform-i8042-serio-0-event-kbd";
-        m_touchpadFd = ::open(kPath, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        m_touchpadFd = ::open(kPath, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (m_touchpadFd < 0) {
+            m_touchpadFd = ::open(kPath, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        }
         if (m_touchpadFd < 0) {
             return;
         }
+        // Self-heal the scancode mapping: the EC sends the touchpad hotkey
+        // as scancode 0x76 (LEFTCTRL+LEFTMETA+F24) and the hwdb rule in
+        // scripts/ remaps it to KEY_TOUCHPAD_TOGGLE — but anything that
+        // resets the kernel keymap (driver rebind, early-boot udev race)
+        // leaves a dead F24 that nobody listens to. Re-applying it here
+        // keeps the hotkey working regardless of udev timing.
+        int keymap[2] = { 0x76, KEY_TOUCHPAD_TOGGLE };
+        ::ioctl(m_touchpadFd, EVIOCSKEYCODE, keymap);
         m_touchpadNotifier = new QSocketNotifier(m_touchpadFd, QSocketNotifier::Read, this);
         connect(m_touchpadNotifier, &QSocketNotifier::activated, this, [this] {
             struct input_event events[32];
