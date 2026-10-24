@@ -2343,13 +2343,16 @@ PlasmoidItem {
                    mode === 13 ? Qt.rgba(0.5, 0.7, 1, 0.35) :
                    mode === 14 ? Qt.rgba(0.4, 0.8, 1, 0.35) :
                    mode === 15 ? Qt.rgba(1, 0.45, 0.2, 0.34) :
-                   mode === 16 ? Qt.rgba(0.4, 0.8, 1, 0.35) :
+                   mode === 16 ? (root.touchpadEnabled ? Qt.rgba(0.2, 0.9, 0.5, 0.30) : Qt.rgba(0.92, 0.30, 0.36, 0.32)) :
                    Qt.rgba(0.55, 0.4, 1, 0.3)
 
             Kirigami.Icon {
                 anchors.centerIn: parent
                 width: parent.width * 0.62
                 height: width
+                // Touchpad ON gets the green treatment; OFF keeps the red X
+                // badge baked into input-touchpad-off.
+                color: mode === 16 && root.touchpadEnabled ? "#55e36a" : "white"
                 source: mode === 2 ? iconName :
                         mode === 3 ? "input-keyboard" :
                         mode === 5 ? "download" :

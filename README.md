@@ -10,8 +10,7 @@ extended and tuned for an **MSI Pulse GL66 11UGKV (MS-1581)** running Fedora
 and Plasma 6.
 
 <p align="center">
-  <img src="docs/island.png" alt="Compact Dynamic Island with media and audio bars" width="540"><br><br>
-  <img src="docs/status.png" alt="System status panel with CPU, GPU, RAM and battery" width="380">
+  <img src="docs/demo-collage.png" alt="Dynamic Island demo: capsules and popouts" width="720">
 </p>
 
 ## Why this fork
