@@ -31,6 +31,7 @@ class AudioLevels : public QObject
     Q_PROPERTY(bool running READ running WRITE setRunning NOTIFY runningChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
     Q_PROPERTY(QVariantList levels READ levels NOTIFY levelsChanged)
+    Q_PROPERTY(QVariantList peaks READ peaks NOTIFY levelsChanged)
     Q_PROPERTY(QString mediaIdentity READ mediaIdentity WRITE setMediaIdentity NOTIFY mediaIdentityChanged)
 
 public:
@@ -54,6 +55,7 @@ public:
     bool running() const { return m_running.load(); }
     bool ready() const { return m_ready.load(); }
     QVariantList levels() const { return m_levels; }
+    QVariantList peaks() const { return m_peaksList; }
     QString mediaIdentity() const { return m_mediaIdentity; }
 
 public Q_SLOTS:
@@ -166,11 +168,12 @@ private:
         m_targetSinkInputIndex = PA_INVALID_INDEX;
         m_samples.clear();
         m_smoothed.fill(0.0f);
+        m_peaks.fill(0.0f);
         if (m_ready.exchange(false) && !m_destroying) {
             Q_EMIT readyChanged();
         }
         if (!m_destroying) {
-            setLevels({0.0, 0.0, 0.0, 0.0, 0.0});
+            setLevels({0.0, 0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0, 0.0});
         }
     }
 
@@ -433,6 +436,7 @@ private:
         m_sinkInputIndex = sinkInputIndex;
         m_samples.clear();
         m_smoothed.fill(0.0f);
+        m_peaks.fill(0.0f);
 
         pa_sample_spec spec;
         spec.format = PA_SAMPLE_FLOAT32LE;
@@ -505,10 +509,26 @@ private:
                     0.0f, 1.0f);
                 const float target = normalized * activity;
                 const float old = m_smoothed[i];
-                // Moderate attack/release: enough motion to follow beats,
-                // without the previous saturated, pinned-to-the-top look.
-                m_smoothed[i] = target > old ? old + (target - old) * 0.55f
-                                             : old + (target - old) * 0.20f;
+                // Fast attack, slower release with a constant gravity term.
+                // The gravity guarantees that a bar keeps falling even when it
+                // sits close to its target, which is what gives Cava-style
+                // meters their natural, non-sticky decay.
+                float next = old;
+                if (target > old) {
+                    next = old + (target - old) * 0.62f;
+                } else {
+                    next = old - (old - target) * 0.22f;
+                    next = std::min(next, old - 0.008f);
+                    next = std::max(next, target);
+                }
+                m_smoothed[i] = std::clamp(next, 0.0f, 1.0f);
+
+                // Peak-hold cap: snap up with the bar, then fall on its own.
+                if (m_smoothed[i] >= m_peaks[i]) {
+                    m_peaks[i] = m_smoothed[i];
+                } else {
+                    m_peaks[i] = std::max(m_smoothed[i], m_peaks[i] - 0.008f);
+                }
             }
             publishLevels();
             m_samples.erase(m_samples.begin(), m_samples.begin() + kSampleCount);
@@ -563,12 +583,13 @@ private:
             return;
         }
         m_emitTimer.restart();
-        std::array<float, kBandCount> levels = m_smoothed;
-        QMetaObject::invokeMethod(this, [this, levels] {
+        const std::array<float, kBandCount> levels = m_smoothed;
+        const std::array<float, kBandCount> peaks = m_peaks;
+        QMetaObject::invokeMethod(this, [this, levels, peaks] {
             if (m_destroying || !m_running.load() || !m_loop) {
                 return;
             }
-            setLevels(levels);
+            setLevels(levels, peaks);
         }, Qt::QueuedConnection);
     }
 
@@ -585,14 +606,19 @@ private:
         }, Qt::QueuedConnection);
     }
 
-    void setLevels(const std::array<float, kBandCount> &levels)
+    void setLevels(const std::array<float, kBandCount> &levels,
+                   const std::array<float, kBandCount> &peaks)
     {
-        QVariantList list;
-        list.reserve(kBandCount);
-        for (float level : levels) {
-            list.append(level);
+        QVariantList levelList;
+        QVariantList peakList;
+        levelList.reserve(kBandCount);
+        peakList.reserve(kBandCount);
+        for (int i = 0; i < kBandCount; ++i) {
+            levelList.append(levels[i]);
+            peakList.append(peaks[i]);
         }
-        m_levels = list;
+        m_levels = levelList;
+        m_peaksList = peakList;
         Q_EMIT levelsChanged();
     }
 
@@ -609,7 +635,9 @@ private:
     QString m_mediaIdentity;
     std::vector<float> m_samples;
     std::array<float, kBandCount> m_smoothed{};
+    std::array<float, kBandCount> m_peaks{};
     QVariantList m_levels;
+    QVariantList m_peaksList;
     QElapsedTimer m_emitTimer;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_ready{false};

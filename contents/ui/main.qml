@@ -74,7 +74,11 @@ PlasmoidItem {
     readonly property int compactSidePadding: 1
     readonly property int compactLeadingWidth: {
         if (showGreenDot) return 10
-        if (activeMode === 0) return 24 + 5 + 22
+        // The screen-sharing dot lives inside the media block, so its width and
+        // the gap after it must be part of the leading budget. Without this the
+        // capsule is measured 15 px too narrow and the separator/time overlap
+        // the title as soon as the dot appears.
+        if (activeMode === 0) return (sharingWithMedia ? 10 + 5 : 0) + 24 + 5 + 22
         if (activeMode === 14) return 136
         return 24
     }
@@ -1769,6 +1773,7 @@ PlasmoidItem {
                 visible: root.activeMode === 0
                 playing: root.mediaPlaying
                 levels: audioLevels.levels
+                peaks: audioLevels.peaks
                 reactive: audioLevels.ready
                 Layout.preferredWidth: 24
                 Layout.preferredHeight: 26
@@ -2510,59 +2515,96 @@ PlasmoidItem {
         }
     }
 
-    component SoundBars: Row {
+    // Five-band spectrum meter. Bars grow from a shared baseline instead of
+    // from their centre, fade towards the bottom and carry a small peak-hold
+    // cap that falls on its own gravity, the way Cava draws its bars.
+    component SoundBars: Item {
         id: soundBarsRoot
 
         property bool playing: false
         property bool reactive: false
         property var levels: []
+        property var peaks: []
 
-        spacing: 2
-        width: 23
-        height: 26
+        readonly property int barCount: 5
+        readonly property real barSpacing: 2
+        readonly property real barWidth: Math.max(1, (width - barSpacing * (barCount - 1)) / barCount)
+        readonly property real usableHeight: Math.max(1, height - 2)
 
-        Repeater {
-            model: [14, 22, 10, 18, 16]
+        implicitWidth: 23
+        implicitHeight: 26
 
-            Rectangle {
-                id: bar
-                width: 3
-                height: soundBarsRoot.reactive && soundBarsRoot.levels.length > index
-                    ? 4 + soundBarsRoot.levels[index] * 22
-                    : modelData * fakeLevel
-                anchors.verticalCenter: parent.verticalCenter
-                radius: 1.5
-                color: root.textPrimary
-                opacity: soundBarsRoot.playing ? 0.9 : 0.55
+        Row {
+            anchors.fill: parent
+            spacing: soundBarsRoot.barSpacing
 
-                property real fakeLevel: 0.45
+            Repeater {
+                model: soundBarsRoot.barCount
 
-                Behavior on height {
-                    enabled: soundBarsRoot.reactive
-                    NumberAnimation { duration: 45; easing.type: Easing.OutQuad }
-                }
+                Item {
+                    id: barSlot
 
-                // Fallback when no monitor stream is ready: a lightweight
-                // animation-engine pulse. Once real levels arrive, the height
-                // is driven by the audio callback instead.
-                SequentialAnimation {
-                    running: soundBarsRoot.playing && !soundBarsRoot.reactive
-                    loops: Animation.Infinite
-                    NumberAnimation {
-                        target: bar
-                        property: "fakeLevel"
-                        from: 0.35
-                        to: 1
-                        duration: 240 + (index % 5) * 100
-                        easing.type: Easing.InOutSine
+                    width: soundBarsRoot.barWidth
+                    height: soundBarsRoot.height
+
+                    property real fakeLevel: 0.45
+                    readonly property real level: (soundBarsRoot.reactive && soundBarsRoot.levels && soundBarsRoot.levels.length > index)
+                        ? Math.max(0, Math.min(1, soundBarsRoot.levels[index]))
+                        : (0.3 + index * 0.12) * fakeLevel
+                    readonly property real peak: (soundBarsRoot.reactive && soundBarsRoot.peaks && soundBarsRoot.peaks.length > index)
+                        ? Math.max(0, Math.min(1, soundBarsRoot.peaks[index]))
+                        : 0
+
+                    Rectangle {
+                        anchors.bottom: parent.bottom
+                        width: parent.width
+                        height: Math.max(2, barSlot.level * soundBarsRoot.usableHeight)
+                        radius: width / 2
+                        opacity: soundBarsRoot.playing ? 0.95 : 0.5
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.98) }
+                            GradientStop { position: 1.0; color: Qt.rgba(1, 1, 1, 0.45) }
+                        }
+
+                        Behavior on height {
+                            NumberAnimation { duration: 30; easing.type: Easing.OutQuad }
+                        }
                     }
-                    NumberAnimation {
-                        target: bar
-                        property: "fakeLevel"
-                        from: 1
-                        to: 0.35
-                        duration: 240 + (index % 5) * 100
-                        easing.type: Easing.InOutSine
+
+                    Rectangle {
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: Math.min(soundBarsRoot.height - 2,
+                            barSlot.peak * soundBarsRoot.usableHeight + 1)
+                        width: parent.width
+                        height: 1.5
+                        radius: 0.75
+                        color: "white"
+                        opacity: 0.9
+                        visible: soundBarsRoot.reactive && barSlot.peak > 0.03
+                    }
+
+                    // Fallback when no monitor stream is ready: a lightweight
+                    // animation-engine pulse. Once real levels arrive, the
+                    // height is driven by the audio callback instead.
+                    SequentialAnimation {
+                        running: soundBarsRoot.playing && !soundBarsRoot.reactive
+                        loops: Animation.Infinite
+                        NumberAnimation {
+                            target: barSlot
+                            property: "fakeLevel"
+                            from: 0.35
+                            to: 1
+                            duration: 240 + (index % 5) * 100
+                            easing.type: Easing.InOutSine
+                        }
+                        NumberAnimation {
+                            target: barSlot
+                            property: "fakeLevel"
+                            from: 1
+                            to: 0.35
+                            duration: 240 + (index % 5) * 100
+                            easing.type: Easing.InOutSine
+                        }
                     }
                 }
             }

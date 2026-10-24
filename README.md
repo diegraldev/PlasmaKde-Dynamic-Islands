@@ -73,6 +73,11 @@ PulseAudio stream while media is playing and closes it on pause.
 - A fixed spectral calibration and a deliberately wide **38 dB** range keep
   ordinary playback in the lower/middle part of each bar. A bar only reaches
   the top when its own frequency range is genuinely dominant.
+- The bars use a fast attack and a slower release with a constant gravity term,
+  so they follow beats and still fall smoothly instead of sticking near the top.
+  A small peak-hold cap falls on its own for the Cava-style look.
+- Bars grow from a shared baseline (not from their centre) and fade towards the
+  bottom, which reads as a real spectrum meter rather than a pulsing icon.
 - The expanded music panel shows cover, title, progress and controls; the bars
   stay in the compact capsule.
 
