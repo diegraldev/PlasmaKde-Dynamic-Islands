@@ -108,6 +108,25 @@ sysfs attribute writes, so the plugin watches `cooler_boost`, `webcam`,
 Cooler Boost from MControlCenter or a shell and the capsule announces it
 instantly. There is no polling daemon.
 
+### Firmware Fn keys (Cooler Boost) — kernel fork
+
+The Fn Cooler Boost combo is executed by the EC firmware before the OS sees
+it. The WMI notification *does* reach the kernel, but stock `msi-wmi` drops
+unmapped vendor events with just a `dmesg` line, so nothing ever reached
+userspace. `kernel/msi-wmi/` in this repo is a DKMS fork that reports **every
+raw vendor event** as `EV_MSC/MSC_RAW` on the `MSI WMI hotkeys` input device;
+the plugin's hotkey watcher catches those, re-reads the EC once and announces
+the change — still fully event-driven:
+
+```sh
+cd kernel/msi-wmi
+sudo ./install.sh
+systemctl --user restart plasma-plasmashell.service
+```
+
+Bonus: dmesg now logs the actual vendor scancode (`Unknown key pressed -
+0x…`), so events can be promoted to proper keycodes later.
+
 ### Passwordless writes (optional)
 
 By default the MSI EC attributes are owned by root and are read-only for the
