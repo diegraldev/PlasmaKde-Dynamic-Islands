@@ -1,0 +1,7 @@
+# MSI Pulse GL66 11UGKV (MS-1581): the Fn touchpad key is sent by the EC as
+# the Windows shortcut LEFTCTRL+LEFTMETA+F24. Map the F24 scancode to
+# KEY_TOUCHPAD_TOGGLE so KWin really toggles the touchpad (and the Dynamic
+# Island capsule announces it through the KWin input DBus) instead of a dead
+# F24 that nothing listens to.
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnMicro-Star*:pnPulseGL6611UGKV:*
+ KEYBOARD_KEY_76=touchpad_toggle
