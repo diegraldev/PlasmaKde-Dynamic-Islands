@@ -1063,11 +1063,18 @@ PlasmoidItem {
         function onCoolerBoostChanged() {
             root.announceMsi("Cooler Boost " + (msi.coolerBoost ? "on" : "off"), "weather-windy")
         }
-        // Fn touchpad hotkey: KWin still has to process this very key event
-        // before the new state is readable, so let the settle timer delay
-        // the read — announcing the pre-toggle state both hides the capsule
-        // (no change detected) and inverts the announced value.
+        // Fn touchpad hotkey. Every press flips the real state (EC firmware
+        // and KWin toggle in lockstep), so mirror the flip locally and
+        // announce immediately — no async read sits between the key event
+        // and the capsule. The settle timer afterwards silently re-reads
+        // KWin as a drift correction.
         function onTouchpadToggle() {
+            root.touchpadEnabled = !root.touchpadEnabled
+            if (root.touchpadReady) {
+                root.modeIndex = 16
+                root.eventTimer.restart()
+            }
+            root.touchpadReady = true
             touchpadSettleTimer.restart()
         }
         function onWebcamBlockedChanged() {
@@ -1091,12 +1098,13 @@ PlasmoidItem {
         }
     }
 
-    // Holds the announcement fire until KWin has applied the touchpad toggle
-    // triggered by the same key event we just observed.
+    // Silent drift correction: after the key-triggered flip, re-read KWin's
+    // authoritative state once it has settled. announce=false keeps it from
+    // double-announcing; a failed read simply leaves the local mirror as is.
     Timer {
         id: touchpadSettleTimer
         interval: 150
-        onTriggered: root.syncTouchpadEnabled(true)
+        onTriggered: root.syncTouchpadEnabled(false)
     }
 
     // One PropertiesChanged watcher per discovered touchpad node (some laptops
