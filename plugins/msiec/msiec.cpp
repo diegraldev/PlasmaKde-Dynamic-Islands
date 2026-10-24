@@ -12,6 +12,8 @@
 #include <QTimer>
 
 #include <fcntl.h>
+#include <cerrno>
+#include <cstring>
 #include <linux/input.h>
 #include <unistd.h>
 
@@ -442,9 +444,11 @@ private:
         static const char kPath[] = "/dev/input/by-path/platform-i8042-serio-0-event-kbd";
         m_touchpadFd = ::open(kPath, O_RDWR | O_NONBLOCK | O_CLOEXEC);
         if (m_touchpadFd < 0) {
+            qWarning("[TP] O_RDWR open failed (%s), trying O_RDONLY", strerror(errno));
             m_touchpadFd = ::open(kPath, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         }
         if (m_touchpadFd < 0) {
+            qWarning("[TP] cannot open keyboard node at all");
             return;
         }
         // Self-heal the scancode mapping: the EC sends the touchpad hotkey
@@ -454,7 +458,15 @@ private:
         // leaves a dead F24 that nobody listens to. Re-applying it here
         // keeps the hotkey working regardless of udev timing.
         int keymap[2] = { 0x76, KEY_TOUCHPAD_TOGGLE };
-        ::ioctl(m_touchpadFd, EVIOCSKEYCODE, keymap);
+        const int setRet = ::ioctl(m_touchpadFd, EVIOCSKEYCODE, keymap);
+        char resolved[256];
+        const ssize_t linkLen = ::readlink(kPath, resolved, sizeof(resolved) - 1);
+        if (linkLen > 0) {
+            resolved[linkLen] = '\0';
+        } else {
+            resolved[0] = '\0';
+        }
+        qWarning("[TP] watcher open fd=%d node->%s keymap set=%d", m_touchpadFd, resolved, setRet);
         m_touchpadNotifier = new QSocketNotifier(m_touchpadFd, QSocketNotifier::Read, this);
         connect(m_touchpadNotifier, &QSocketNotifier::activated, this, [this] {
             struct input_event events[32];

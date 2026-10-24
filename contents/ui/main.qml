@@ -852,13 +852,28 @@ PlasmoidItem {
         })
     }
 
+    // Fn touchpad hotkey: flip the local mirror and announce. The event
+    // window is armed before the mode flips so the panel-resize cascade can
+    // never leave the capsule without its 3s window.
+    function handleTouchpadToggle() {
+        if (tpDebounce.running) {
+            return
+        }
+        tpDebounce.restart()
+        root.touchpadEnabled = !root.touchpadEnabled
+        root.touchpadReady = true
+        eventTimer.restart()
+        root.modeIndex = 16
+        touchpadSettleTimer.restart()
+    }
+
     function applyTouchpadState(on, announce) {
         const changed = root.touchpadReady && on !== root.touchpadEnabled
         root.touchpadEnabled = on
         root.touchpadReady = true
         if (announce && changed) {
             root.modeIndex = 16
-            root.eventTimer.restart()
+            eventTimer.restart()
         }
     }
 
@@ -1063,27 +1078,11 @@ PlasmoidItem {
         function onCoolerBoostChanged() {
             root.announceMsi("Cooler Boost " + (msi.coolerBoost ? "on" : "off"), "weather-windy")
         }
-        // Fn touchpad hotkey. Every press flips the real state (EC firmware
-        // and KWin toggle in lockstep), so mirror the flip locally and
-        // announce immediately — no async read sits between the key event
-        // and the capsule. The settle timer afterwards silently re-reads
-        // KWin as a drift correction.
-        // Fn touchpad hotkey. The EC sends the Ctrl+Meta+F24 shortcut TWICE
-        // per physical press, so coalesce the burst. The event window must
-        // be armed BEFORE the mode flips: switching the compact capsule to a
-        // different width makes the panel applet resize synchronously, and
-        // that cascade must not be able to leave the announcement without
-        // its 3s window.
+        // Fn touchpad hotkey. Connected both declaratively here and
+        // imperatively from Component.onCompleted; the tpDebounce guard in
+        // the shared handler makes the double wiring harmless.
         function onTouchpadToggle() {
-            if (tpDebounce.running) {
-                return
-            }
-            tpDebounce.restart()
-            root.touchpadEnabled = !root.touchpadEnabled
-            root.touchpadReady = true
-            root.eventTimer.restart()
-            root.modeIndex = 16
-            touchpadSettleTimer.restart()
+            root.handleTouchpadToggle()
         }
         function onWebcamBlockedChanged() {
             root.updateCameraStatus(true)
@@ -1101,6 +1100,9 @@ PlasmoidItem {
     Component.onCompleted: {
         root.updateCameraStatus(false)
         root.findTouchpad()
+        // Imperative wiring as a belt-and-braces parallel to the Connections
+        // handler above; tpDebounce absorbs the double call.
+        msi.touchpadToggle.connect(() => root.handleTouchpadToggle())
         if (root.enableTimer) {
             root.enumerateTimers()
         }
