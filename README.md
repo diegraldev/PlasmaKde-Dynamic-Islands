@@ -272,7 +272,6 @@ difference is only noticeable in how quickly the dashboard reacts.
 - MControlCenter does not always refresh after an external sysfs write; reopen
   it if its values look stale. The actual MSI EC values are correct.
 - RGB and keyboard backlighting are intentionally out of scope for this fork. Check [rgb-backlight](https://github.com/diegraldev/rgb-backlight).
-\
 
 ## Ideas / roadmap
 
