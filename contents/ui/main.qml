@@ -2347,6 +2347,7 @@ PlasmoidItem {
                    Qt.rgba(0.55, 0.4, 1, 0.3)
 
             Kirigami.Icon {
+                visible: mode !== 16
                 anchors.centerIn: parent
                 width: parent.width * 0.62
                 height: width
@@ -2362,8 +2363,47 @@ PlasmoidItem {
                         mode === 13 ? root.lockIcon :
                         mode === 14 ? (root.volWatcher.muted ? "audio-volume-muted" : "audio-volume-high") :
                         mode === 15 ? root.msiIcon :
-                        mode === 16 ? "input-touchpad" :
                         "utilities-terminal"
+            }
+
+            // Hand-drawn touchpad glyph (mode 16): the black panel look the
+            // Breeze input-touchpad icons have, without depending on the
+            // icon theme actually shipping them.
+            Item {
+                visible: mode === 16
+                anchors.centerIn: parent
+                width: parent.width * 0.56
+                height: width * 0.82
+
+                Rectangle {
+                    id: tpPanel
+                    anchors.fill: parent
+                    radius: 2
+                    color: "#15181d"
+                    border.color: Qt.rgba(1, 1, 1, 0.62)
+                    border.width: 1
+                }
+
+                // Button strip divider along the bottom, with its own
+                // center split like the real touchpad glyph.
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: parent.height * 0.30
+                    color: "transparent"
+                    border.color: Qt.rgba(1, 1, 1, 0.62)
+                    border.width: 1
+                    radius: 2
+                }
+
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    height: parent.height * 0.30
+                    width: 1
+                    color: Qt.rgba(1, 1, 1, 0.62)
+                }
             }
 
             // Touchpad state badge: the inverse of the off-X — a check when
