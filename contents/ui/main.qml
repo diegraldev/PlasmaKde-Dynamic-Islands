@@ -256,6 +256,9 @@ PlasmoidItem {
         if (activeMode === 15) {
             return eventTimer.running ? root.msiMessage : ""
         }
+        if (activeMode === 16) {
+            return eventTimer.running ? (root.touchpadEnabled ? "Touchpad on" : "Touchpad off") : ""
+        }
         return ""
     }
 
@@ -291,6 +294,16 @@ PlasmoidItem {
     readonly property bool enableCamera: Plasmoid.configuration.enableCamera
     property bool cameraAvailable: false
     property bool cameraReady: false
+
+    // Touchpad state straight from KWin's input device objects. The Dynamic
+    // input DBus exposes every device at /org/kde/KWin/InputDevice/<node>
+    // with a `touchpad` flag and an `enabled` property that emits
+    // PropertiesChanged, so the capsule follows the real state with zero
+    // polling — no matter whether the toggle came from the Fn key, a KDE
+    // shortcut or System Settings.
+    property var touchpadPaths: []
+    property bool touchpadEnabled: true
+    property bool touchpadReady: false
     readonly property bool cameraBlocked: msi.available && msi.webcamBlocked
     readonly property bool enableMic: Plasmoid.configuration.enableMic
     property bool micMuted: false
@@ -767,6 +780,88 @@ PlasmoidItem {
         cameraReady = true
     }
 
+    // Discover the KWin input device nodes that are touchpads. The event node
+    // names are enumerated via DBus introspection (they are not stable across
+    // boots, so they cannot be hardcoded), then each node is probed for its
+    // `touchpad` flag.
+    function findTouchpad() {
+        const reply = DBus.SessionBus.asyncCall({
+            service: "org.kde.KWin",
+            path: "/org/kde/KWin/InputDevice",
+            iface: "org.freedesktop.DBus.Introspectable",
+            member: "Introspect",
+            signature: "",
+            arguments: []
+        })
+        reply.finished.connect(() => {
+            if (reply.isError) {
+                reply.destroy()
+                return
+            }
+            const xml = String(reply.value || "")
+            reply.destroy()
+            const nodes = xml.match(/event\d+/g) || []
+            for (let i = 0; i < nodes.length; i++) {
+                root.probeTouchpadNode(nodes[i])
+            }
+        })
+    }
+
+    function probeTouchpadNode(node) {
+        const reply = DBus.SessionBus.asyncCall({
+            service: "org.kde.KWin",
+            path: "/org/kde/KWin/InputDevice/" + node,
+            iface: "org.freedesktop.DBus.Properties",
+            member: "Get",
+            signature: "(ss)",
+            arguments: ["org.kde.KWin.InputDevice", "touchpad"]
+        })
+        reply.finished.connect(() => {
+            let isTouchpad = false
+            if (!reply.isError) {
+                const v = reply.value
+                isTouchpad = v === true || (v && typeof v === "object" && v.value === true)
+            }
+            reply.destroy()
+            if (isTouchpad && root.touchpadPaths.indexOf("/org/kde/KWin/InputDevice/" + node) === -1) {
+                root.touchpadPaths = root.touchpadPaths.concat("/org/kde/KWin/InputDevice/" + node)
+                root.syncTouchpadEnabled(false)
+            }
+        })
+    }
+
+    function syncTouchpadEnabled(announce) {
+        if (root.touchpadPaths.length === 0) {
+            return
+        }
+        const reply = DBus.SessionBus.asyncCall({
+            service: "org.kde.KWin",
+            path: root.touchpadPaths[0],
+            iface: "org.freedesktop.DBus.Properties",
+            member: "Get",
+            signature: "(ss)",
+            arguments: ["org.kde.KWin.InputDevice", "enabled"]
+        })
+        reply.finished.connect(() => {
+            if (!reply.isError) {
+                const v = reply.value
+                const on = v === true || (v && typeof v === "object" && v.value === true)
+                root.applyTouchpadState(on, announce)
+            }
+            reply.destroy()
+        })
+    }
+
+    function applyTouchpadState(on, announce) {
+        const changed = root.touchpadReady && on !== root.touchpadEnabled
+        root.touchpadEnabled = on
+        root.touchpadReady = true
+        if (announce && changed) {
+            root.modeIndex = 16
+            root.eventTimer.restart()
+        }
+    }
+
     // Microphone mute state. The native MicState plugin pushes the current mute
     // state on every real change, so this only pulses the announcement when the
     // state differs from what we last announced.
@@ -983,8 +1078,36 @@ PlasmoidItem {
 
     Component.onCompleted: {
         root.updateCameraStatus(false)
+        root.findTouchpad()
         if (root.enableTimer) {
             root.enumerateTimers()
+        }
+    }
+
+    // One PropertiesChanged watcher per discovered touchpad node (some laptops
+    // expose the same panel over two buses). Whichever node KWin toggles, the
+    // capsule sees it.
+    Instantiator {
+        model: root.touchpadPaths
+
+        DBus.SignalWatcher {
+            service: "org.kde.KWin"
+            path: modelData
+            iface: "org.freedesktop.DBus.Properties"
+            enabled: root.enableKeyboard
+
+            function dbusPropertiesChanged(iface, changed) {
+                if (iface !== "org.kde.KWin.InputDevice") {
+                    return
+                }
+                const boxed = changed["enabled"]
+                if (boxed === undefined) {
+                    return
+                }
+                const on = boxed === true
+                    || (boxed && typeof boxed === "object" && boxed.value === true)
+                root.applyTouchpadState(on, true)
+            }
         }
     }
 
@@ -2021,7 +2144,8 @@ PlasmoidItem {
                           root.displayMode === 11 ? (root.timerRinging ? "Timer complete" : "Timer running") :
                           root.displayMode === 12 ? "Battery" :
                           root.displayMode === 14 ? (root.volWatcher.muted ? "Muted" : "Volume") :
-                          root.displayMode === 15 ? "MSI EC" : "Status"
+                          root.displayMode === 15 ? "MSI EC" :
+                          root.displayMode === 16 ? "Touchpad" : "Status"
                     color: root.textSecondary
                     font.pointSize: 10
                     elide: Text.ElideRight
@@ -2181,6 +2305,7 @@ PlasmoidItem {
                    mode === 13 ? Qt.rgba(0.5, 0.7, 1, 0.35) :
                    mode === 14 ? Qt.rgba(0.4, 0.8, 1, 0.35) :
                    mode === 15 ? Qt.rgba(1, 0.45, 0.2, 0.34) :
+                   mode === 16 ? Qt.rgba(0.4, 0.8, 1, 0.35) :
                    Qt.rgba(0.55, 0.4, 1, 0.3)
 
             Kirigami.Icon {
@@ -2199,6 +2324,7 @@ PlasmoidItem {
                         mode === 13 ? root.lockIcon :
                         mode === 14 ? (root.volWatcher.muted ? "audio-volume-muted" : "audio-volume-high") :
                         mode === 15 ? root.msiIcon :
+                        mode === 16 ? (root.touchpadEnabled ? "input-touchpad" : "input-touchpad-off") :
                         "utilities-terminal"
             }
         }
