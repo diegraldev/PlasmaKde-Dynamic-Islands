@@ -2350,9 +2350,6 @@ PlasmoidItem {
                 anchors.centerIn: parent
                 width: parent.width * 0.62
                 height: width
-                // Touchpad ON gets the green treatment; OFF keeps the red X
-                // badge baked into input-touchpad-off.
-                color: mode === 16 && root.touchpadEnabled ? "#55e36a" : "white"
                 source: mode === 2 ? iconName :
                         mode === 3 ? "input-keyboard" :
                         mode === 5 ? "download" :
@@ -2365,8 +2362,31 @@ PlasmoidItem {
                         mode === 13 ? root.lockIcon :
                         mode === 14 ? (root.volWatcher.muted ? "audio-volume-muted" : "audio-volume-high") :
                         mode === 15 ? root.msiIcon :
-                        mode === 16 ? (root.touchpadEnabled ? "input-touchpad" : "input-touchpad-off") :
+                        mode === 16 ? "input-touchpad" :
                         "utilities-terminal"
+            }
+
+            // Touchpad state badge: the inverse of the off-X — a check when
+            // enabled, a cross when disabled.
+            Rectangle {
+                visible: mode === 16
+                width: parent.width * 0.44
+                height: width
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                radius: width / 2
+                color: root.touchpadEnabled ? "#2fbf57" : "#d93846"
+                border.color: Qt.rgba(1, 1, 1, 0.9)
+                border.width: 1
+
+                PlasmaComponents.Label {
+                    anchors.centerIn: parent
+                    anchors.verticalCenterOffset: -parent.height * 0.03
+                    text: root.touchpadEnabled ? "\u2713" : "\u2715"
+                    color: "white"
+                    font.pixelSize: Math.round(parent.height * 0.6)
+                    font.bold: true
+                }
             }
         }
     }
