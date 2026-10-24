@@ -87,7 +87,7 @@ PlasmoidItem {
         if (!root.compactTitle || root.compactTitle.length === 0) {
             return showGreenDot ? 0 : 20
         }
-        const textWidth = measured + 8  // breathing room before the module separator
+        const textWidth = measured + 6  // breathing room before the module separator
         const maxTextWidth = Math.min(300,
             compactMaxWidth - compactLeadingWidth - compactTrailingWidth
             - compactGapWidth - compactSeparatorsWidth - compactSidePadding * 2)
@@ -660,9 +660,16 @@ PlasmoidItem {
         const widest = Math.max(Plasmoid.configuration.expandedWidthMusic,
                                 Math.max(Plasmoid.configuration.expandedWidthNotification,
                                          Plasmoid.configuration.expandedWidthStatus))
+        // A long media title widens the compact capsule; if the capsule ever
+        // became wider than this window, Plasma would centre the window on it
+        // instead of clamping it against the screen's right edge and the
+        // right pivot would drift left. Keeping the window at least as wide
+        // as the capsule plus both screen gaps guarantees the clamp (and the
+        // fixed pivot) for every capsule size.
+        const needed = root.compactWidth + root.popupRightMargin * 2 + 16
         const geo = Plasmoid.screenGeometry
-        const room = geo ? geo.width - popupRightMargin * 2 : widest
-        return Math.max(240, Math.min(widest, room))
+        const room = geo ? geo.width - popupRightMargin * 2 : Math.max(widest, needed)
+        return Math.max(240, Math.min(Math.max(widest, needed), room))
     }
     // The visible panel is right-anchored inside the popup window: its right
     // edge is the fixed pivot and it only ever grows leftward, whatever its
