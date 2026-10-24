@@ -96,6 +96,7 @@ public:
             m_fsRefresh.setInterval(80);
             connect(&m_fsRefresh, &QTimer::timeout, this, &MsiEc::refresh);
             setupHotkeyWatcher();
+            setupTouchpadWatcher();
             refresh();
         }
     }
@@ -108,6 +109,9 @@ public:
         }
         if (m_hotkeyFd >= 0) {
             ::close(m_hotkeyFd);
+        }
+        if (m_touchpadFd >= 0) {
+            ::close(m_touchpadFd);
         }
     }
 
@@ -237,6 +241,12 @@ Q_SIGNALS:
     void gpuFanChanged();
     void modelChanged();
     void lastErrorChanged();
+    // Fired when the AT keyboard reports KEY_TOUCHPAD_TOGGLE (530): the Fn
+    // touchpad hotkey (remapped from the EC's Ctrl+Meta+F24 by the hwdb
+    // rule shipped in scripts/). KWin toggles the touchpad for this key but
+    // does not emit PropertiesChanged on its input DBus objects, so this is
+    // the only event-driven notification of the toggle.
+    void touchpadToggle();
 
 private:
     void scheduleFsRefresh()
@@ -424,6 +434,38 @@ private:
         }
     }
 
+    void setupTouchpadWatcher()
+    {
+        // The Fn touchpad key arrives on the AT keyboard as
+        // KEY_TOUCHPAD_TOGGLE after the hwdb remap. Watch the stable by-path
+        // node and ignore everything else — no key is ever logged.
+        static const char kPath[] = "/dev/input/by-path/platform-i8042-serio-0-event-kbd";
+        m_touchpadFd = ::open(kPath, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (m_touchpadFd < 0) {
+            return;
+        }
+        m_touchpadNotifier = new QSocketNotifier(m_touchpadFd, QSocketNotifier::Read, this);
+        connect(m_touchpadNotifier, &QSocketNotifier::activated, this, [this] {
+            struct input_event events[32];
+            bool toggled = false;
+            while (true) {
+                const ssize_t bytes = ::read(m_touchpadFd, events, sizeof(events));
+                if (bytes <= 0) {
+                    break;
+                }
+                const int count = static_cast<int>(bytes / sizeof(struct input_event));
+                for (int i = 0; i < count; i++) {
+                    if (events[i].type == EV_KEY && events[i].code == 530 && events[i].value == 1) {
+                        toggled = true;
+                    }
+                }
+            }
+            if (toggled) {
+                Q_EMIT touchpadToggle();
+            }
+        });
+    }
+
     QString m_root;
     QString m_model;
     QString m_pkexec;
@@ -450,6 +492,8 @@ private:
     QSocketNotifier *m_hotkeyNotifier = nullptr;
     int m_hotkeyFd = -1;
     QTimer m_hotkeyRefresh;
+    QSocketNotifier *m_touchpadNotifier = nullptr;
+    int m_touchpadFd = -1;
 };
 
 class MsiEcPlugin : public QQmlExtensionPlugin

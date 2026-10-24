@@ -1063,6 +1063,13 @@ PlasmoidItem {
         function onCoolerBoostChanged() {
             root.announceMsi("Cooler Boost " + (msi.coolerBoost ? "on" : "off"), "weather-windy")
         }
+        // Fn touchpad hotkey: KWin still has to process this very key event
+        // before the new state is readable, so let the settle timer delay
+        // the read — announcing the pre-toggle state both hides the capsule
+        // (no change detected) and inverts the announced value.
+        function onTouchpadToggle() {
+            touchpadSettleTimer.restart()
+        }
         function onWebcamBlockedChanged() {
             root.updateCameraStatus(true)
         }
@@ -1084,6 +1091,14 @@ PlasmoidItem {
         }
     }
 
+    // Holds the announcement fire until KWin has applied the touchpad toggle
+    // triggered by the same key event we just observed.
+    Timer {
+        id: touchpadSettleTimer
+        interval: 150
+        onTriggered: root.syncTouchpadEnabled(true)
+    }
+
     // One PropertiesChanged watcher per discovered touchpad node (some laptops
     // expose the same panel over two buses). Whichever node KWin toggles, the
     // capsule sees it.
@@ -1094,7 +1109,6 @@ PlasmoidItem {
             service: "org.kde.KWin"
             path: modelData
             iface: "org.freedesktop.DBus.Properties"
-            enabled: root.enableKeyboard
 
             function dbusPropertiesChanged(iface, changed) {
                 if (iface !== "org.kde.KWin.InputDevice") {
