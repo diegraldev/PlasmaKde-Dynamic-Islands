@@ -27,11 +27,13 @@ every day:
   temperatures, RAM usage and battery state.
 - **Media-aware click zones**: while music is playing, the left side opens the
   media panel and the right side opens the status panel.
-- **MSI EC integration** for fan mode, shift mode, Cooler Boost, Super Battery
-  and the webcam kill switch, with the familiar
-  **Performance / Balanced / Powersave** labels.
-- **Popup edge protection**: wide popups shift left automatically when the
-  island is close to the right edge of the screen.
+- **MSI EC awareness** for Cooler Boost and the webcam kill switch: the island
+  announces state changes made from anywhere (Fn keys, MControlCenter,
+  scripts), driven by inotify on the EC sysfs attributes plus the MSI WMI
+  hotkey device — zero polling.
+- **Right-pinned popup**: one parent window whose width never depends on the
+  active mode; the visible panel hangs from a fixed right pivot and only grows
+  leftward, so music, notification and status popouts share the same right edge.
 
 ## Features
 
@@ -51,7 +53,7 @@ every day:
 | IDE builds | Build app, success/failure and progress. |
 | Timers | KClock integration with a ringing state and controls. |
 | System status | CPU, GPU, RAM and battery tiles, sampled only while the panel is open. |
-| MSI EC | Fan, shift, Cooler Boost, Super Battery and webcam switch, available from the context menu. |
+| MSI EC | CPU/GPU temperatures in the status panel plus event-driven Cooler Boost and webcam announcements. |
 
 ## Media and audio bars
 
@@ -85,23 +87,26 @@ itself when nothing is playing) to open the read-only status panel.
 - The `SystemStats` sampler runs only while the popup is open and stops when it
   closes.
 
-MSI controls are intentionally **not** in the status popup. They live in the
-applet's context menu, so the dashboard stays a dashboard.
+MSI controls are intentionally **not** in the status popup (or anywhere else —
+the context menu is gone). The island is a passive observer: a dashboard stays
+a dashboard.
 
-## MSI EC controls
+## MSI EC awareness
 
-The applet reads and writes the MSI EC attributes under
+The applet reads the MSI EC attributes under
 `/sys/devices/platform/msi-ec`:
 
-- `shift_mode`: shown as **Performance** (`turbo`), **Balanced** (`comfort`) or
-  **Powersave** (`eco`).
-- `fan_mode`: auto, silent or advanced.
-- `cooler_boost`.
-- `super_battery`.
+- `shift_mode`, `fan_mode`, `cooler_boost`, `super_battery`.
 - `webcam_block` / webcam kill switch.
+- CPU/GPU temperatures and fan speeds for the status popup.
 
-Values are read on demand and refreshed when the popup opens, after an action,
-or when an MSI WMI Fn hotkey is pressed. There is no polling daemon.
+Values are read on demand and refreshed when the popup opens, when the MSI WMI
+Fn-hotkey device reports a key press, or — the interesting part — when an
+**external tool writes an attribute**: kernfs emits inotify `MODIFY` events for
+sysfs attribute writes, so the plugin watches `cooler_boost`, `webcam`,
+`webcam_block`, `fan_mode`, `shift_mode` and `super_battery` directly. Toggle
+Cooler Boost from MControlCenter or a shell and the capsule announces it
+instantly. There is no polling daemon.
 
 ### Passwordless writes (optional)
 
@@ -189,8 +194,8 @@ Right-click the island and open **Configure Dynamic Island** to adjust:
 - notification behaviour;
 - popup width and height.
 
-The **context menu** contains the MSI fan, shift, Cooler Boost, Super Battery and
-webcam controls.
+The **context menu** is intentionally empty: MSI EC controls were removed in
+favour of passive, event-driven announcements.
 
 ## Architecture
 

@@ -45,46 +45,10 @@ PlasmoidItem {
 
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
 
-    // MSI EC controls are exposed through the applet context menu. They are
-    // one-shot actions (no menu, daemon or polling): the write path uses the
-    // sysfs attribute directly when permitted, otherwise a single pkexec call.
-    Plasmoid.contextualActions: [
-        PlasmaCore.Action {
-            text: msi.coolerBoost ? "Disable Cooler Boost" : "Enable Cooler Boost"
-            icon.name: "weather-windy"
-            visible: msi.available
-            enabled: msi.canControl
-            onTriggered: root.toggleMsiCoolerBoost()
-        },
-        PlasmaCore.Action {
-            text: "Fan mode: " + (msi.fanMode || "unknown")
-            icon.name: "fan"
-            visible: msi.available
-            enabled: msi.canControl && msi.availableFanModes.length > 0
-            onTriggered: root.cycleMsiFan()
-        },
-        PlasmaCore.Action {
-            text: "Shift mode: " + root.msiShiftName(msi.shiftMode)
-            icon.name: "speedometer"
-            visible: msi.available
-            enabled: msi.canControl && msi.availableShiftModes.length > 0
-            onTriggered: root.cycleMsiShift()
-        },
-        PlasmaCore.Action {
-            text: msi.superBattery ? "Disable Super Battery" : "Enable Super Battery"
-            icon.name: "battery-good"
-            visible: msi.available
-            enabled: msi.canControl
-            onTriggered: root.toggleMsiSuperBattery()
-        },
-        PlasmaCore.Action {
-            text: msi.webcamBlocked ? "Unblock Webcam" : "Block Webcam"
-            icon.name: msi.webcamBlocked ? "camera-web" : "camera-off"
-            visible: msi.available
-            enabled: msi.canControl
-            onTriggered: root.toggleMsiWebcam()
-        }
-    ]
+    // MSI EC controls are passive now: no context menu. The island only
+    // announces state changes (e.g. Cooler Boost toggled from outside), driven
+    // by the plugin's inotify watch on the sysfs attributes and the Fn-key
+    // hotkey device — still zero polling.
 
     // Native hover tooltip showing the full text the compact capsule elides.
     toolTipMainText: {
@@ -115,15 +79,15 @@ PlasmoidItem {
         return 24
     }
     readonly property int compactTrailingWidth: (activeMode === 2 && unreadCount > 0) ? 22 : Math.ceil(compactTimeMetrics.width)
-    readonly property int compactGapWidth: showGreenDot ? 8 : moduleSeparators ? 4 : 6
-    readonly property int compactSeparatorsWidth: moduleSeparators ? Math.max(0, compactVisibleList.length - 1) * 10 : 0
+    readonly property int compactGapWidth: showGreenDot ? 8 : 5
+    readonly property int compactSeparatorsWidth: moduleSeparators ? Math.max(0, compactVisibleList.length - 1) * 15 : 0
     readonly property int compactTextWidth: {
         const measured = Math.ceil(compactTitleMetrics.width)
         // When idle or empty text, don't reserve space
         if (!root.compactTitle || root.compactTitle.length === 0) {
             return showGreenDot ? 0 : 20
         }
-        const textWidth = measured + 4  // 4px buffer for rounding
+        const textWidth = measured + 8  // breathing room before the module separator
         const maxTextWidth = Math.min(300,
             compactMaxWidth - compactLeadingWidth - compactTrailingWidth
             - compactGapWidth - compactSeparatorsWidth - compactSidePadding * 2)
@@ -683,16 +647,51 @@ PlasmoidItem {
         return p.y > geo.y + geo.height / 2 ? PlasmaCore.Types.BottomEdge : PlasmaCore.Types.TopEdge
     }
 
-    // PlasmaCore.Dialog centres the popup on its visual parent. The island sits
-    // at the far right of the panel, so a 300/340 px popup would extend past the
-    // Pinned right anchor: popup grows leftward; right edge stays at screen edge - margin.
+    // One parent window for every popup mode, with a size that does not depend
+    // on the active mode. PlasmaCore.Dialog repositions its window whenever the
+    // mainItem resizes, so a per-mode width made the popup jump and detach from
+    // the island whenever the mode changed while it was open (and an invisible
+    // repositioned anchor fought the compositor's own placement on Wayland).
+    // A constant window is placed once by Plasma (clamped against the screen,
+    // which pins its right edge since the island sits at the far right) and
+    // never moves again; only the visible panel inside changes width.
     readonly property int popupRightMargin: 16
-    readonly property real popupAnchorX: {
+    readonly property int popupWindowWidth: {
+        const widest = Math.max(Plasmoid.configuration.expandedWidthMusic,
+                                Math.max(Plasmoid.configuration.expandedWidthNotification,
+                                         Plasmoid.configuration.expandedWidthStatus))
         const geo = Plasmoid.screenGeometry
-        if (!geo || root.width <= 0 || root.mapToGlobal === undefined) return 0
-        const screenRight = geo.x + geo.width
-        const appletGlobal = root.mapToGlobal(Qt.point(0, 0)).x
-        return (screenRight - root.popupRightMargin - root.expandedWidth) - appletGlobal
+        const room = geo ? geo.width - popupRightMargin * 2 : widest
+        return Math.max(240, Math.min(widest, room))
+    }
+    // The visible panel is right-anchored inside the popup window: its right
+    // edge is the fixed pivot and it only ever grows leftward, whatever its
+    // width is.
+    readonly property int popupPanelWidth: Math.min(root.expandedWidth, root.popupWindowWidth)
+    // Plasma clamps the popup window flush against the screen's right edge,
+    // but the capsule (and the floating panel bar around it) stops short of
+    // that edge. Offset the visible panel by the same distance so its right
+    // edge hangs level with the capsule/bar instead of touching the screen
+    // border.
+    readonly property real popupPanelRightMargin: {
+        // Re-evaluate when the popup opens so a panel moved at runtime is
+        // measured fresh (mapToGlobal is not a notifiable property).
+        const open = root.popupOpen
+        const geo = Plasmoid.screenGeometry
+        if (!geo || root.width <= 0 || root.mapToGlobal === undefined || !open) {
+            return root.popupRightMargin
+        }
+        const islandRight = root.mapToGlobal(Qt.point(root.width, 0)).x
+        const gap = (geo.x + geo.width) - islandRight
+        // A gap beyond a sane bound means the island is not at the screen's
+        // right end (Plasma would centre the window, not clamp it) — keep the
+        // plain breathing margin then.
+        if (gap < 0 || gap > 200) {
+            return root.popupRightMargin
+        }
+        // Align the panel's right edge with the floating panel bar's end:
+        // the bar sits ~9px inboard of the applet's right edge.
+        return Math.max(4, gap - 9)
     }
 
     Timer {
@@ -852,75 +851,13 @@ PlasmoidItem {
         return "battery-" + level + (battery.charging ? "-charging" : "")
     }
 
-    // MSI EC announcements. The action is applied by the plugin; the capsule
-    // mirrors the requested state immediately and the plugin refreshes later.
+    // MSI EC announcements. State changes are pushed by the plugin (inotify on
+    // the sysfs attributes, MSI WMI hotkey events); the capsule mirrors them.
     function announceMsi(message, icon) {
         root.msiMessage = message
         root.msiIcon = icon || "weather-windy"
         modeIndex = 15
         eventTimer.restart()
-    }
-
-    function toggleMsiCoolerBoost() {
-        const next = !msi.coolerBoost
-        msi.setCoolerBoost(next)
-        root.announceMsi("Cooler Boost " + (next ? "on" : "off"), "weather-windy")
-    }
-
-    function cycleMsiFan() {
-        const modes = msi.availableFanModes
-        if (modes.length === 0) {
-            return
-        }
-        const current = modes.indexOf(msi.fanMode)
-        const next = modes[(current + 1) % modes.length]
-        msi.setFanMode(next)
-        root.announceMsi("Fan: " + next, "fan")
-    }
-
-    function msiShiftName(mode) {
-        // MControlCenter calls the same MSI EC values Performance/Balanced/
-        // Powersave. Keep the raw sysfs value internal and show the familiar
-        // names in the capsule.
-        if (mode === "turbo") return "Performance"
-        if (mode === "comfort") return "Balanced"
-        if (mode === "eco") return "Powersave"
-        return mode || "unknown"
-    }
-
-    function cycleMsiShift() {
-        const preferred = ["turbo", "comfort", "eco"]
-        let modes = preferred.filter(mode => msi.availableShiftModes.indexOf(mode) !== -1)
-        if (modes.length === 0) {
-            modes = msi.availableShiftModes
-        }
-        if (modes.length === 0) {
-            return
-        }
-        const current = modes.indexOf(msi.shiftMode)
-        const next = modes[(current + 1) % modes.length]
-        msi.setShiftMode(next)
-        root.announceMsi("Shift: " + root.msiShiftName(next), "speedometer")
-    }
-
-    function toggleMsiSuperBattery() {
-        const next = !msi.superBattery
-        msi.setSuperBattery(next)
-        root.announceMsi("Super Battery " + (next ? "on" : "off"), "battery-good")
-    }
-
-    function toggleMsiWebcam() {
-        const next = !msi.webcamBlocked
-        msi.setWebcamBlocked(next)
-        root.announceMsi("Webcam " + (next ? "blocked" : "enabled"), next ? "camera-off" : "camera-web")
-    }
-
-    function msiFanLabel() {
-        return "Fan " + (msi.fanMode || "?")
-    }
-
-    function msiShiftLabel() {
-        return "Shift " + root.msiShiftName(msi.shiftMode)
     }
 
     // AC adapter plugged/unplugged. The capsule text is derived reactively from
@@ -1014,26 +951,35 @@ PlasmoidItem {
         }
     }
 
-    // Event-driven camera detection: the CameraStatus plugin watches /dev via
-    // inotify and signals only when the set of video devices actually changes.
-    // No polling, no QMediaDevices, no Solid.
+    // Event-driven camera detection: the CameraStatus plugin watches the
+    // video4linux subsystem via udev and signals only when capture devices
+    // actually appear or disappear. A change there almost always means the EC
+    // webcam switch (or an external tool) flipped too, so re-read the MSI
+    // snapshot once before recomputing availability — otherwise a stale
+    // webcamBlocked state would mask the change and swallow the announcement.
     Connections {
         target: CameraStatus
 
         function onCameraAvailableChanged() {
+            msi.refresh()
             root.updateCameraStatus(true)
         }
         function onVideoCountChanged() {
+            msi.refresh()
             root.updateCameraStatus(true)
         }
     }
 
-    // The MSI EC webcam kill switch does not create a udev event. The plugin
-    // refreshes on Fn hotkey events (and on popup open), so react to its state
-    // instead of scanning sysfs here.
+    // MSI EC state transitions. The initial refresh runs inside the plugin
+    // constructor, before these handlers exist, so only real external changes
+    // (sysfs writes caught by the plugin's inotify watch, Fn hotkeys) arrive
+    // here.
     Connections {
         target: msi
 
+        function onCoolerBoostChanged() {
+            root.announceMsi("Cooler Boost " + (msi.coolerBoost ? "on" : "off"), "weather-windy")
+        }
         function onWebcamBlockedChanged() {
             root.updateCameraStatus(true)
         }
@@ -1530,19 +1476,10 @@ PlasmoidItem {
         }
     }
 
-    // Empty, non-interactive anchor used only for popup positioning.
-    Item {
-        id: popupAnchor
-        width: root.expandedWidth
-        height: root.height
-        x: root.popupAnchorX
-        y: 0
-    }
-
     PlasmaCore.Dialog {
         id: popup
 
-        visualParent: popupAnchor
+        visualParent: island
         location: root.popupLocation
         visible: false
         hideOnWindowDeactivate: false
@@ -1563,37 +1500,49 @@ PlasmoidItem {
 
         mainItem: Item {
             id: popupRootItem
-            width: root.expandedWidth
+            width: root.popupWindowWidth
             height: root.expandedHeight + root.popupGapTop + root.popupGapBottom
             opacity: root.popupOpen ? 1 : 0
             scale: root.popupOpen ? 1 : 0.92
+            transformOrigin: Item.Right
 
-            Item {
-                anchors.left: parent.left
+            // Hover tracking spans the gap rows plus the visible panel width.
+            // The transparent strip a narrow panel leaves on the left of the
+            // window is inert: hovering it cannot keep the popup open.
+            MouseArea {
+                id: popupMouseArea
+
+                z: 10
                 anchors.right: parent.right
+                anchors.rightMargin: root.popupPanelRightMargin
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
+                width: root.popupPanelWidth
+                hoverEnabled: true
+                // Hover-track the whole popup to dismiss on leave, but let
+                // presses fall through to the content buttons below so that
+                // interacting with the expanded panel keeps it open instead
+                // of hiding on every click/hover.
+                onPressed: (mouse) => mouse.accepted = false
+                onEntered: {
+                    popupCloseTimer.stop()
+                    popup.visible = true
+                    root.popupOpen = true
+                }
+                onExited: root.closePopup()
+            }
+
+            // The panel hangs from the window's right edge (the fixed pivot)
+            // and grows left by its own width; the gap margins sit between
+            // the capsule and the panel.
+            Item {
+                anchors.right: parent.right
+                anchors.rightMargin: root.popupPanelRightMargin
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: root.popupPanelWidth
                 anchors.topMargin: root.popupGapTop
                 anchors.bottomMargin: root.popupGapBottom
-
-                MouseArea {
-                    id: popupMouseArea
-
-                    z: 10
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    // Hover-track the whole popup to dismiss on leave, but let
-                    // presses fall through to the content buttons below so that
-                    // interacting with the expanded panel keeps it open instead
-                    // of hiding on every click/hover.
-                    onPressed: (mouse) => mouse.accepted = false
-                    onEntered: {
-                        popupCloseTimer.stop()
-                        popup.visible = true
-                        root.popupOpen = true
-                    }
-                    onExited: root.closePopup()
-                }
 
                 Rectangle {
                     anchors.fill: parent
@@ -1622,7 +1571,7 @@ PlasmoidItem {
             anchors.fill: parent
             anchors.leftMargin: root.compactSidePadding
             anchors.rightMargin: root.compactSidePadding
-            spacing: root.moduleSeparators ? 4 : 6
+            spacing: 5
 
             Repeater {
                 model: root.compactVisibleList
@@ -1630,7 +1579,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.alignment: Qt.AlignVCenter
                     Layout.fillWidth: modelData === "content"
-                    spacing: root.moduleSeparators ? 4 : 6
+                    spacing: 5
 
                     PlasmaComponents.Label {
                         visible: index > 0 && root.moduleSeparators

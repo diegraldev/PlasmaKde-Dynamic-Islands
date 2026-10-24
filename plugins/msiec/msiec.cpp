@@ -19,11 +19,11 @@
 //
 // The kernel's msi-ec driver exposes fan modes, Cooler Boost, Shift modes,
 // Super Battery, the webcam kill switch and the Fn/Win key positions through
-// sysfs. Reading is free; writes are root-only, so the plugin first tries a
-// direct write (works after the optional udev permission rule) and otherwise
-// runs one-shot `pkexec /usr/bin/tee <attr>`. No daemon and no polling: values
-// refresh when the popup opens, after a user action, or when the MSI WMI
-// hotkey input device emits a key event.
+// sysfs. Reading is free; the plugin is fully passive now: values refresh
+// when the popup opens, when an external tool writes one of the sysfs
+// attributes (kernfs emits inotify MODIFY for attribute writes, so the files
+// are watched directly), or when the MSI WMI hotkey input device emits a key
+// event. No daemon, no polling.
 class MsiEc : public QObject
 {
     Q_OBJECT
@@ -62,8 +62,39 @@ public:
         if (m_available) {
             m_fsWatcher = new QFileSystemWatcher(this);
             m_fsWatcher->addPath(m_root);
+            // External tools (MControlCenter, shell scripts) write the
+            // attributes directly. kernfs emits inotify MODIFY for sysfs
+            // attribute writes, so watching the files themselves catches
+            // those changes for free. Our own reads never produce MODIFY, so
+            // this cannot loop.
+            const QStringList watchedAttributes = {
+                QStringLiteral("cooler_boost"),
+                QStringLiteral("super_battery"),
+                QStringLiteral("webcam"),
+                QStringLiteral("webcam_block"),
+                QStringLiteral("fan_mode"),
+                QStringLiteral("shift_mode"),
+            };
+            for (const QString &attr : watchedAttributes) {
+                const QString path = m_root + QLatin1Char('/') + attr;
+                if (QFileInfo::exists(path)) {
+                    m_fsWatcher->addPath(path);
+                }
+            }
             connect(m_fsWatcher, &QFileSystemWatcher::directoryChanged,
-                    this, &MsiEc::refresh);
+                    this, &MsiEc::scheduleFsRefresh);
+            connect(m_fsWatcher, &QFileSystemWatcher::fileChanged,
+                    this, [this](const QString &path) {
+                // Watches can be dropped after a change event; sysfs
+                // attributes persist, so re-arm defensively.
+                if (!m_fsWatcher->files().contains(path) && QFileInfo::exists(path)) {
+                    m_fsWatcher->addPath(path);
+                }
+                scheduleFsRefresh();
+            });
+            m_fsRefresh.setSingleShot(true);
+            m_fsRefresh.setInterval(80);
+            connect(&m_fsRefresh, &QTimer::timeout, this, &MsiEc::refresh);
             setupHotkeyWatcher();
             refresh();
         }
@@ -208,6 +239,14 @@ Q_SIGNALS:
     void lastErrorChanged();
 
 private:
+    void scheduleFsRefresh()
+    {
+        // Coalesce a burst of attribute writes into a single re-read.
+        if (!m_fsRefresh.isActive()) {
+            m_fsRefresh.start();
+        }
+    }
+
     static QString readText(const QString &path)
     {
         QFile file(path);
@@ -365,7 +404,11 @@ private:
                     }
                     const int count = static_cast<int>(bytes / sizeof(struct input_event));
                     for (int i = 0; i < count; ++i) {
-                        if (events[i].type == EV_KEY && events[i].value == 1) {
+                        // Key presses, autorepeats and raw MSC scans (some WMI
+                        // events are not mapped to keycodes) all count as
+                        // "something happened on the island's EC hotkeys".
+                        if ((events[i].type == EV_KEY && (events[i].value == 1 || events[i].value == 2))
+                            || events[i].type == EV_MSC) {
                             // Coalesce the burst of key events into one refresh.
                             if (!m_hotkeyRefresh.isActive()) {
                                 m_hotkeyRefresh.start();
@@ -402,6 +445,7 @@ private:
     int m_gpuTemp = 0;
     int m_gpuFan = 0;
     QFileSystemWatcher *m_fsWatcher = nullptr;
+    QTimer m_fsRefresh;
     QProcess *m_writeProc = nullptr;
     QSocketNotifier *m_hotkeyNotifier = nullptr;
     int m_hotkeyFd = -1;
