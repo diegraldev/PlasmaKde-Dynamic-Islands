@@ -154,6 +154,7 @@ PlasmoidItem {
     readonly property bool enableDownloads: Plasmoid.configuration.enableDownloads
     readonly property bool enableScreenSharing: Plasmoid.configuration.enableScreenSharing
     readonly property bool enableTimer: Plasmoid.configuration.enableTimer
+    readonly property int audioBarsStyle: Plasmoid.configuration.audioBarsStyle
     readonly property bool moduleSeparators: Plasmoid.configuration.moduleSeparators
     readonly property var compactVisibleList: {
         let out = []
@@ -1775,6 +1776,7 @@ PlasmoidItem {
                 levels: audioLevels.levels
                 peaks: audioLevels.peaks
                 reactive: audioLevels.ready
+                styleIndex: root.audioBarsStyle
                 Layout.preferredWidth: 24
                 Layout.preferredHeight: 26
             }
@@ -2068,6 +2070,7 @@ PlasmoidItem {
                 width: 32
                 height: 24
                 playing: notificationPulse.running
+                styleIndex: root.audioBarsStyle
             }
 
             Column {
@@ -2515,9 +2518,14 @@ PlasmoidItem {
         }
     }
 
-    // Five-band spectrum meter. Bars grow from a shared baseline instead of
-    // from their centre, fade towards the bottom and carry a small peak-hold
-    // cap that falls on its own gravity, the way Cava draws its bars.
+    // Five-band spectrum meter with five selectable skins. The audio analysis
+    // is shared (levels + peaks from the C++ plugin); only the drawing and the
+    // motion change. `styleIndex` maps to the audioBarsStyle setting:
+    //   0 Classic  - bottom bars with a falling peak cap
+    //   1 Mirror   - bars grow symmetrically from the centre
+    //   2 Dots     - LED columns that light up segment by segment
+    //   3 Wave     - smooth filled waveform through the five bands
+    //   4 Neon     - accent-coloured glowing tubes with a bright tip
     component SoundBars: Item {
         id: soundBarsRoot
 
@@ -2525,85 +2533,347 @@ PlasmoidItem {
         property bool reactive: false
         property var levels: []
         property var peaks: []
+        property int styleIndex: 0
 
         readonly property int barCount: 5
         readonly property real barSpacing: 2
         readonly property real barWidth: Math.max(1, (width - barSpacing * (barCount - 1)) / barCount)
         readonly property real usableHeight: Math.max(1, height - 2)
+        // Drives the fallback animation when no monitor stream is ready.
+        property real pulsePhase: 0
 
         implicitWidth: 23
         implicitHeight: 26
 
-        Row {
+        function levelAt(i) {
+            if (reactive && levels && levels.length > i) {
+                return Math.max(0, Math.min(1, levels[i]))
+            }
+            const phase = pulsePhase * Math.PI * 2
+            return 0.3 + 0.42 * (0.5 + 0.5 * Math.sin(phase + i * 1.15))
+        }
+
+        function peakAt(i) {
+            if (reactive && peaks && peaks.length > i) {
+                return Math.max(0, Math.min(1, peaks[i]))
+            }
+            return 0
+        }
+
+        SequentialAnimation on pulsePhase {
+            running: soundBarsRoot.playing && !soundBarsRoot.reactive
+            loops: Animation.Infinite
+            NumberAnimation { from: 0; to: 1; duration: 1100; easing.type: Easing.InOutSine }
+            NumberAnimation { from: 1; to: 0; duration: 1100; easing.type: Easing.InOutSine }
+        }
+
+        Loader {
             anchors.fill: parent
-            spacing: soundBarsRoot.barSpacing
+            sourceComponent: soundBarsRoot.styleIndex === 1 ? mirrorSkin
+                : soundBarsRoot.styleIndex === 2 ? dotsSkin
+                : soundBarsRoot.styleIndex === 3 ? waveSkin
+                : soundBarsRoot.styleIndex === 4 ? neonSkin
+                : classicSkin
+        }
 
-            Repeater {
-                model: soundBarsRoot.barCount
+        // ---- 0. Classic: bottom-anchored bars with peak caps ----
+        Component {
+            id: classicSkin
 
-                Item {
-                    id: barSlot
+            Row {
+                width: soundBarsRoot.width
+                height: soundBarsRoot.height
+                spacing: soundBarsRoot.barSpacing
 
-                    width: soundBarsRoot.barWidth
-                    height: soundBarsRoot.height
+                Repeater {
+                    model: soundBarsRoot.barCount
 
-                    property real fakeLevel: 0.45
-                    readonly property real level: (soundBarsRoot.reactive && soundBarsRoot.levels && soundBarsRoot.levels.length > index)
-                        ? Math.max(0, Math.min(1, soundBarsRoot.levels[index]))
-                        : (0.3 + index * 0.12) * fakeLevel
-                    readonly property real peak: (soundBarsRoot.reactive && soundBarsRoot.peaks && soundBarsRoot.peaks.length > index)
-                        ? Math.max(0, Math.min(1, soundBarsRoot.peaks[index]))
-                        : 0
+                    Item {
+                        id: classicSlot
 
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        width: parent.width
-                        height: Math.max(2, barSlot.level * soundBarsRoot.usableHeight)
-                        radius: width / 2
-                        opacity: soundBarsRoot.playing ? 0.95 : 0.5
-                        gradient: Gradient {
-                            GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.98) }
-                            GradientStop { position: 1.0; color: Qt.rgba(1, 1, 1, 0.45) }
+                        width: soundBarsRoot.barWidth
+                        height: soundBarsRoot.height
+
+                        readonly property real lvl: soundBarsRoot.levelAt(index)
+                        readonly property real pk: soundBarsRoot.peakAt(index)
+
+                        Rectangle {
+                            anchors.bottom: parent.bottom
+                            width: parent.width
+                            height: Math.max(2, classicSlot.lvl * soundBarsRoot.usableHeight)
+                            radius: width / 2
+                            opacity: soundBarsRoot.playing ? 0.95 : 0.5
+                            gradient: Gradient {
+                                GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.98) }
+                                GradientStop { position: 1.0; color: Qt.rgba(1, 1, 1, 0.45) }
+                            }
+
+                            Behavior on height {
+                                NumberAnimation { duration: 30; easing.type: Easing.OutQuad }
+                            }
                         }
 
-                        Behavior on height {
-                            NumberAnimation { duration: 30; easing.type: Easing.OutQuad }
+                        Rectangle {
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: Math.min(soundBarsRoot.height - 2,
+                                classicSlot.pk * soundBarsRoot.usableHeight + 1)
+                            width: parent.width
+                            height: 1.5
+                            radius: 0.75
+                            color: "white"
+                            opacity: 0.9
+                            visible: soundBarsRoot.reactive && classicSlot.pk > 0.03
                         }
                     }
+                }
+            }
+        }
 
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        anchors.bottomMargin: Math.min(soundBarsRoot.height - 2,
-                            barSlot.peak * soundBarsRoot.usableHeight + 1)
-                        width: parent.width
-                        height: 1.5
-                        radius: 0.75
-                        color: "white"
-                        opacity: 0.9
-                        visible: soundBarsRoot.reactive && barSlot.peak > 0.03
+        // ---- 1. Mirror: bars grow from the vertical centre ----
+        Component {
+            id: mirrorSkin
+
+            Item {
+                width: soundBarsRoot.width
+                height: soundBarsRoot.height
+
+                Row {
+                    anchors.fill: parent
+                    spacing: soundBarsRoot.barSpacing
+
+                    Repeater {
+                        model: soundBarsRoot.barCount
+
+                        Item {
+                            id: mirrorSlot
+
+                            width: soundBarsRoot.barWidth
+                            height: soundBarsRoot.height
+
+                            readonly property real lvl: soundBarsRoot.levelAt(index)
+
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width
+                                height: Math.max(2, mirrorSlot.lvl * (soundBarsRoot.height - 2))
+                                radius: width / 2
+                                opacity: soundBarsRoot.playing ? 0.95 : 0.5
+                                gradient: Gradient {
+                                    GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.32) }
+                                    GradientStop { position: 0.5; color: Qt.rgba(1, 1, 1, 0.98) }
+                                    GradientStop { position: 1.0; color: Qt.rgba(1, 1, 1, 0.32) }
+                                }
+
+                                Behavior on height {
+                                    NumberAnimation { duration: 40; easing.type: Easing.OutCubic }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width
+                    height: 1
+                    color: Qt.rgba(1, 1, 1, 0.14)
+                }
+            }
+        }
+
+        // ---- 2. Dots: LED columns, lit from the bottom ----
+        Component {
+            id: dotsSkin
+
+            Row {
+                width: soundBarsRoot.width
+                height: soundBarsRoot.height
+                spacing: soundBarsRoot.barSpacing
+
+                Repeater {
+                    model: soundBarsRoot.barCount
+
+                    Item {
+                        id: dotsSlot
+
+                        width: soundBarsRoot.barWidth
+                        height: soundBarsRoot.height
+
+                        readonly property int dotCount: 5
+                        readonly property real dotGap: 1.5
+                        readonly property real dotSize: Math.min(width,
+                            (height - dotGap * (dotCount - 1)) / dotCount)
+                        readonly property int lit: Math.round(soundBarsRoot.levelAt(index) * dotCount)
+                        readonly property int peakDot: Math.round(soundBarsRoot.peakAt(index) * dotCount) - 1
+
+                        Column {
+                            anchors.centerIn: parent
+                            spacing: dotsSlot.dotGap
+
+                            Repeater {
+                                model: dotsSlot.dotCount
+
+                                Rectangle {
+                                    readonly property int levelIndex: dotsSlot.dotCount - 1 - index
+
+                                    width: dotsSlot.dotSize
+                                    height: width
+                                    radius: width / 2
+                                    color: "white"
+                                    opacity: levelIndex < dotsSlot.lit
+                                        ? (0.55 + 0.45 * (levelIndex + 1) / dotsSlot.dotCount)
+                                        : (levelIndex === dotsSlot.peakDot ? 0.4 : 0.1)
+
+                                    Behavior on opacity {
+                                        NumberAnimation { duration: 90; easing.type: Easing.OutQuad }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 3. Wave: smooth filled waveform through the five bands ----
+        Component {
+            id: waveSkin
+
+            Item {
+                width: soundBarsRoot.width
+                height: soundBarsRoot.height
+
+                Canvas {
+                    id: waveCanvas
+
+                    anchors.fill: parent
+
+                    function paintWave() {
+                        const ctx = getContext("2d")
+                        const w = width
+                        const h = height
+                        if (w <= 0 || h <= 0) {
+                            return
+                        }
+                        ctx.clearRect(0, 0, w, h)
+                        const n = soundBarsRoot.barCount
+                        const pts = []
+                        for (let i = 0; i < n; ++i) {
+                            pts.push({
+                                x: (i + 0.5) * w / n,
+                                y: h - 2 - soundBarsRoot.levelAt(i) * (h - 4)
+                            })
+                        }
+
+                        const traceTop = function () {
+                            ctx.moveTo(0, pts[0].y)
+                            for (let i = 1; i < n; ++i) {
+                                const xc = (pts[i - 1].x + pts[i].x) / 2
+                                const yc = (pts[i - 1].y + pts[i].y) / 2
+                                ctx.quadraticCurveTo(pts[i - 1].x, pts[i - 1].y, xc, yc)
+                            }
+                            ctx.quadraticCurveTo(pts[n - 1].x, pts[n - 1].y, w, pts[n - 1].y)
+                        }
+
+                        ctx.beginPath()
+                        traceTop()
+                        ctx.lineTo(w, h)
+                        ctx.lineTo(0, h)
+                        ctx.closePath()
+                        const fill = ctx.createLinearGradient(0, 0, 0, h)
+                        fill.addColorStop(0, "rgba(255,255,255,0.92)")
+                        fill.addColorStop(1, "rgba(255,255,255,0.12)")
+                        ctx.fillStyle = fill
+                        ctx.fill()
+
+                        ctx.beginPath()
+                        traceTop()
+                        ctx.strokeStyle = "rgba(255,255,255,0.95)"
+                        ctx.lineWidth = 1.5
+                        ctx.stroke()
                     }
 
-                    // Fallback when no monitor stream is ready: a lightweight
-                    // animation-engine pulse. Once real levels arrive, the
-                    // height is driven by the audio callback instead.
-                    SequentialAnimation {
-                        running: soundBarsRoot.playing && !soundBarsRoot.reactive
-                        loops: Animation.Infinite
-                        NumberAnimation {
-                            target: barSlot
-                            property: "fakeLevel"
-                            from: 0.35
-                            to: 1
-                            duration: 240 + (index % 5) * 100
-                            easing.type: Easing.InOutSine
+                    onPaint: paintWave()
+                    onWidthChanged: requestPaint()
+                    onHeightChanged: requestPaint()
+                    Component.onCompleted: requestPaint()
+
+                    Connections {
+                        target: soundBarsRoot
+
+                        function onLevelsChanged() { waveCanvas.requestPaint() }
+                        function onPeaksChanged() { waveCanvas.requestPaint() }
+                        function onPulsePhaseChanged() { waveCanvas.requestPaint() }
+                        function onReactiveChanged() { waveCanvas.requestPaint() }
+                    }
+                }
+            }
+        }
+
+        // ---- 4. Neon: accent tubes with a soft glow and a bright tip ----
+        Component {
+            id: neonSkin
+
+            Row {
+                width: soundBarsRoot.width
+                height: soundBarsRoot.height
+                spacing: soundBarsRoot.barSpacing + 1
+
+                Repeater {
+                    model: soundBarsRoot.barCount
+
+                    Item {
+                        id: neonSlot
+
+                        width: Math.max(2, soundBarsRoot.barWidth - 1)
+                        height: soundBarsRoot.height
+
+                        readonly property real lvl: soundBarsRoot.levelAt(index)
+                        readonly property real barHeight: Math.max(2, lvl * (soundBarsRoot.height - 2))
+
+                        Rectangle {
+                            anchors.bottom: parent.bottom
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: parent.width * 1.9
+                            height: neonSlot.barHeight
+                            radius: width / 2
+                            color: root.accent
+                            opacity: 0.22
+
+                            Behavior on height {
+                                NumberAnimation { duration: 40; easing.type: Easing.OutQuad }
+                            }
                         }
-                        NumberAnimation {
-                            target: barSlot
-                            property: "fakeLevel"
-                            from: 1
-                            to: 0.35
-                            duration: 240 + (index % 5) * 100
-                            easing.type: Easing.InOutSine
+
+                        Rectangle {
+                            anchors.bottom: parent.bottom
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: Math.max(1.5, parent.width * 0.55)
+                            height: neonSlot.barHeight
+                            radius: width / 2
+                            opacity: soundBarsRoot.playing ? 1 : 0.55
+                            gradient: Gradient {
+                                GradientStop { position: 0.0; color: Qt.lighter(root.accent, 1.7) }
+                                GradientStop { position: 1.0; color: root.accent }
+                            }
+
+                            Behavior on height {
+                                NumberAnimation { duration: 40; easing.type: Easing.OutQuad }
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: Math.max(1.5, parent.width * 0.55)
+                            height: 2
+                            radius: 1
+                            color: "white"
+                            opacity: 0.9
+                            y: Math.max(0, soundBarsRoot.height - 2 - neonSlot.barHeight - 1)
+
+                            Behavior on y {
+                                NumberAnimation { duration: 40; easing.type: Easing.OutQuad }
+                            }
                         }
                     }
                 }

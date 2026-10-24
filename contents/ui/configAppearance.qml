@@ -14,6 +14,7 @@ Kirigami.FormLayout {
     property string cfg_accentColor: "#8d5cff"
     property string cfg_idleDotColor: "#55e36a"
     property string cfg_sharingDotColor: "#ffaa33"
+    property int cfg_audioBarsStyle: 0
 
     QQC2.Switch {
         id: themeSwitch
@@ -98,6 +99,43 @@ Kirigami.FormLayout {
         Repeater {
             model: ["#ffaa33", "#ff4f6f", "#ffd233", "#2da6e8", "#ffffff"]
             ColorSwatch { swatch: modelData; selected: page.cfg_sharingDotColor === modelData; onPicked: page.cfg_sharingDotColor = modelData }
+        }
+    }
+
+    Item { Kirigami.FormData.isSection: true }
+
+    QQC2.ComboBox {
+        id: barsStyleCombo
+        Kirigami.FormData.label: "Audio bars skin:"
+        model: [
+            "Classic — bars with peak caps",
+            "Mirror — grows from the centre",
+            "Dots — LED segments",
+            "Wave — smooth waveform",
+            "Neon — accent glowing tubes"
+        ]
+        currentIndex: page.cfg_audioBarsStyle
+        onActivated: page.cfg_audioBarsStyle = currentIndex
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        opacity: 0.7
+        font: Kirigami.Theme.smallFont
+        text: {
+            switch (barsStyleCombo.currentIndex) {
+            case 0:
+                return "Bars grow from the bottom and carry a peak cap that falls on its own."
+            case 1:
+                return "Bars grow symmetrically from the vertical centre, like the original capsule."
+            case 2:
+                return "Each band is a column of LED dots that light up with the level."
+            case 3:
+                return "A smooth filled waveform connects the five bands."
+            default:
+                return "Thin accent-coloured tubes with a soft glow and a bright tip."
+            }
         }
     }
 

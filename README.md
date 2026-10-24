@@ -43,7 +43,7 @@ every day:
 | --- | --- |
 | Clock | Time, date and a compact calendar-friendly capsule. |
 | Media | MPRIS cover, title, progress and transport controls. |
-| Audio bars | Five real spectrum bands, normalized per band and shown only in the compact capsule. |
+| Audio bars | Five real spectrum bands with five selectable skins (Classic, Mirror, Dots, Wave, Neon), shown only in the compact capsule. |
 | Notifications | Unread count and a compact notification body. |
 | Keyboard | Current layout name from KWin. |
 | Battery | UPower percentage, charging state, remaining time and low/critical announcements. |
@@ -78,6 +78,13 @@ PulseAudio stream while media is playing and closes it on pause.
   A small peak-hold cap falls on its own for the Cava-style look.
 - Bars grow from a shared baseline (not from their centre) and fade towards the
   bottom, which reads as a real spectrum meter rather than a pulsing icon.
+- Five skins are available in **Settings → Appearance → Audio bars skin**:
+  - **Classic** — bottom bars with a falling peak cap.
+  - **Mirror** — bars grow symmetrically from the vertical centre (the original
+    capsule look).
+  - **Dots** — LED columns that light up segment by segment.
+  - **Wave** — a smooth filled waveform through the five bands.
+  - **Neon** — thin accent-coloured tubes with a soft glow and a bright tip.
 - The expanded music panel shows cover, title, progress and controls; the bars
   stay in the compact capsule.
 
@@ -318,6 +325,7 @@ Things that would fit naturally in future versions:
 
 | Tag | Highlights |
 | --- | --- |
+| `v1.6.0` | Five selectable audio-bar skins: Classic, Mirror, Dots, Wave and Neon. |
 | `v1.5.8` | Sharing-dot width fix, Cava-style audio bars and the touchpad capsule. |
 | `v1.5.7` | Right-pinned popup anchor shared by media and status. |
 | `v1.5.6` | Responsive popup width capped by the available screen space. |
