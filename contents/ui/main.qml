@@ -257,6 +257,7 @@ PlasmoidItem {
             return eventTimer.running ? root.msiMessage : ""
         }
         if (activeMode === 16) {
+            console.warn("[TP] compactTitle mode16, timer:", eventTimer.running, "state:", root.touchpadEnabled)
             return eventTimer.running ? (root.touchpadEnabled ? "Touchpad on" : "Touchpad off") : ""
         }
         return ""
@@ -1070,11 +1071,10 @@ PlasmoidItem {
         // KWin as a drift correction.
         function onTouchpadToggle() {
             root.touchpadEnabled = !root.touchpadEnabled
-            if (root.touchpadReady) {
-                root.modeIndex = 16
-                root.eventTimer.restart()
-            }
             root.touchpadReady = true
+            console.warn("[TP] toggle -> announce, state:", root.touchpadEnabled)
+            root.modeIndex = 16
+            root.eventTimer.restart()
             touchpadSettleTimer.restart()
         }
         function onWebcamBlockedChanged() {
